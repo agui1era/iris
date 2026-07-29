@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iris-care-monitor"
+version = "0.1.0"
+description = "Monitoreo semántico multi-cámara RTSP para el cuidado de adultos mayores."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bcrypt>=4.2,<5",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "numpy>=2.0,<3",
+    "opencv-python-headless>=4.10,<5",
+    "pyjwt>=2.9,<3",
+    "pymongo>=4.9,<5",
+    "python-dotenv>=1.0,<2",
+    "uvicorn>=0.32,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<7",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+iris-monitor = "iris.__main__:main"
+iris-users = "iris.users_cli:main"
+iris-api = "iris.api.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["iris"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+

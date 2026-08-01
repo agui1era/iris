@@ -74,7 +74,6 @@ def _baseline(capture_dir: Path) -> dict[str, str]:
         "POLL_INTERVAL_SECONDS": "30",
         "FRAME_WIDTH": "640",
         "FRAME_HEIGHT": "360",
-        "ANALYSIS_COOLDOWN_SECONDS": "45",
         "MAX_API_CALLS_PER_MINUTE": "10",
         "DASHSCOPE_API_KEY": "dashscope-secret",
         "DASHSCOPE_BASE_URL": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -176,7 +175,6 @@ def test_dashboard_returns_global_capture_settings_and_latest_event(
     assert body["settings"] == {
         "frame_width": 640,
         "frame_height": 360,
-        "analysis_cooldown_seconds": 45.0,
         "max_api_calls_per_minute": 10,
     }
     assert [camera["camera_id"] for camera in body["cameras"]] == ["CAM1", "CAM3"]
@@ -324,6 +322,33 @@ def test_dashboard_failure_never_replaces_latest_completed_analysis(
     assert camera["last_event"]["analysis"]["summary"] == "Último análisis válido."
     assert camera["latest_analysis_status"] == "failed"
     assert camera["latest_analysis_at"] is not None
+
+
+def test_dashboard_reports_skipped_variation_gating_as_completed_not_pending(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    client, headers, _ = _client(
+        tmp_path,
+        [
+            _event("CAM1", now - timedelta(seconds=30), summary="Último análisis real."),
+            _event(
+                "CAM1",
+                now,
+                event_type="analysis.skipped",
+                summary="No debería usarse: un skip no tiene lectura semántica propia.",
+            ),
+        ],
+    )
+
+    response = client.get("/api/dashboard", headers=headers)
+
+    assert response.status_code == 200
+    camera = response.json()["cameras"][0]
+    # A deliberate skip (scene unchanged, low risk) is a settled state, not
+    # something still being processed against Alibaba.
+    assert camera["latest_analysis_status"] == "completed"
+    assert camera["last_event"]["analysis"]["summary"] == "Último análisis real."
 
 
 def test_dashboard_requires_authentication(tmp_path: Path) -> None:

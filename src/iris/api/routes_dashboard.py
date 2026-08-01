@@ -34,13 +34,13 @@ _ANALYSIS_FIELDS = (
     "observations",
     "recommended_action",
     "requires_human_review",
+    "criticidad",
 )
 
 
 class DashboardSettingsResponse(BaseModel):
     frame_width: int
     frame_height: int
-    analysis_cooldown_seconds: float
     max_api_calls_per_minute: int
 
 
@@ -137,7 +137,12 @@ def _latest_attempt_document(
         collection.find(
             {
                 "camera_id": camera_id,
-                "event_type": {"$in": ["analysis.completed", "analysis.failed"]},
+                # analysis.skipped is a deliberate no-op (variation gating), not a
+                # real attempt result, but it still needs to count as the most
+                # recent "attempt" so a skipped cycle isn't shown as PROCESANDO.
+                "event_type": {
+                    "$in": ["analysis.completed", "analysis.failed", "analysis.skipped"]
+                },
             }
         )
         .sort("captured_at", -1)
@@ -279,7 +284,10 @@ def _latest_analysis_state(
     event_type = attempt.get("event_type")
     if event_type == "analysis.failed":
         return "failed", attempt_at.isoformat() if attempt_at is not None else None
-    if event_type == "analysis.completed":
+    if event_type in ("analysis.completed", "analysis.skipped"):
+        # A skip means IRIS deliberately chose not to call Alibaba (the scene
+        # was calm and unchanged): that's a settled, up-to-date state from the
+        # dashboard's point of view, not something still "processing".
         return "completed", attempt_at.isoformat() if attempt_at is not None else None
     return "none", attempt_at.isoformat() if attempt_at is not None else None
 
@@ -417,7 +425,6 @@ def get_dashboard(
     settings = DashboardSettingsResponse(
         frame_width=config.frame_width,
         frame_height=config.frame_height,
-        analysis_cooldown_seconds=config.analysis_cooldown_seconds,
         max_api_calls_per_minute=config.max_api_calls_per_minute,
     )
     return DashboardResponse(revision=revision, settings=settings, cameras=cameras)

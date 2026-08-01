@@ -63,6 +63,9 @@ def test_resolution_is_global_and_polling_can_vary_by_camera(
     assert first.poll_interval_seconds == 30
     assert second.poll_interval_seconds == 90
     assert not hasattr(first, "width")
+    # CHANGE_THRESHOLD_PERCENT is global and real again; only the per-camera
+    # override (CAM2_CHANGE_THRESHOLD_PERCENT) is still legacy/ignored.
+    assert config.change_threshold_percent == pytest.approx(7.5)
     assert "opciones legacy" in caplog.text
 
 
@@ -74,18 +77,18 @@ def test_poll_interval_defaults_to_thirty_seconds_when_unset(
     assert config.poll_interval_seconds == pytest.approx(30.0)
 
 
-def test_rejects_global_poll_interval_below_thirty_seconds(
+def test_rejects_global_poll_interval_below_ten_seconds(
     base_env: dict[str, str],
 ) -> None:
-    with pytest.raises(ConfigurationError, match="mayor o igual a 30"):
-        load_config({**base_env, "POLL_INTERVAL_SECONDS": "29.9"})
+    with pytest.raises(ConfigurationError, match="mayor o igual a 10"):
+        load_config({**base_env, "POLL_INTERVAL_SECONDS": "9.9"})
 
 
-def test_rejects_camera_poll_interval_below_thirty_seconds(
+def test_rejects_camera_poll_interval_below_ten_seconds(
     base_env: dict[str, str],
 ) -> None:
-    with pytest.raises(ConfigurationError, match="CAM1_POLL_INTERVAL_SECONDS.*30"):
-        load_config({**base_env, "CAM1_POLL_INTERVAL_SECONDS": "29.9"})
+    with pytest.raises(ConfigurationError, match="CAM1_POLL_INTERVAL_SECONDS.*10"):
+        load_config({**base_env, "CAM1_POLL_INTERVAL_SECONDS": "9.9"})
 
 
 def test_supports_legacy_urls_and_noncontiguous_camera_indices(

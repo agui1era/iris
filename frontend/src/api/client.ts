@@ -23,6 +23,14 @@ export const SEVERITY_LEVELS = [
 
 export type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
 
+/** The model's own independent criticality colors (`iris.alibaba._CRITICALITY_COLORS`). */
+export const CRITICALITY_COLORS = ["verde", "amarillo", "naranja", "rojo"] as const;
+export type CriticalityColor = (typeof CRITICALITY_COLORS)[number];
+
+/** Fields the history view can sort by (mirrors `_SORT_FIELDS` in `routes_detections.py`). */
+export const DETECTION_SORT_FIELDS = ["captured_at", "camera_id", "criticidad"] as const;
+export type DetectionSortField = (typeof DETECTION_SORT_FIELDS)[number];
+
 /** The only two roles the backend knows about. */
 export const ROLES = ["normal", "admin"] as const;
 export type Role = (typeof ROLES)[number];
@@ -59,6 +67,8 @@ export interface Detection {
   summary: string | null;
   confidence: number | null;
   recommended_action: string | null;
+  /** Model's own independent color judgment: "verde" | "amarillo" | "naranja" | "rojo". */
+  criticidad: string | null;
   has_image: boolean;
 }
 
@@ -74,6 +84,9 @@ export interface DetectionsListParams {
   date_to?: string;
   camera_id?: string;
   severity?: string;
+  criticidad?: string;
+  sort_by?: DetectionSortField;
+  sort_order?: "asc" | "desc";
   page?: number;
   page_size?: number;
 }
@@ -101,10 +114,15 @@ export interface SettingsResponse {
   revision: number;
   frame_width: number;
   frame_height: number;
-  analysis_cooldown_seconds: number;
   max_api_calls_per_minute: number;
   jpeg_quality: number;
   save_image_min_severity: string;
+  /** 0 disables variation gating: every fresh frame is always analyzed. */
+  change_threshold_percent: number;
+  /** Master switch, independent from whether the bot/chat are configured. */
+  telegram_enabled: boolean;
+  /** Read-only: whether TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set (env-only, not editable here). */
+  telegram_configured: boolean;
   alibaba_api_key_configured: boolean;
   alibaba_base_url: string;
   alibaba_model: string;
@@ -115,7 +133,7 @@ export interface SettingsResponse {
 
 /** Mirrors `SettingsUpdateRequest`. */
 export type UpdateSettingsPayload = Partial<
-  Omit<SettingsResponse, "alibaba_api_key_configured">
+  Omit<SettingsResponse, "alibaba_api_key_configured" | "telegram_configured">
 > & {
   /** Write-only. Omit or send an empty value to preserve the configured key. */
   alibaba_api_key?: string;
@@ -132,6 +150,8 @@ export interface AdminCameraRecord {
   rtsp_url: string;
   prompt: string;
   poll_interval_seconds: number;
+  /** Minimum severity to notify (Telegram, etc). Only the threshold is stored today; sending isn't wired up yet. */
+  notification_threshold: string;
 }
 
 /** Per-camera configuration includes its own polling interval. */
@@ -140,6 +160,7 @@ export interface CreateCameraPayload {
   rtsp_url: string;
   prompt: string;
   poll_interval_seconds: number;
+  notification_threshold?: string;
 }
 
 /** Mirrors `UpdateCameraRequest`. Only send the fields being changed; omitted fields are left untouched. */
@@ -148,13 +169,13 @@ export interface UpdateCameraPayload {
   rtsp_url?: string;
   prompt?: string;
   poll_interval_seconds?: number;
+  notification_threshold?: string;
 }
 
 /** Non-secret runtime settings returned with the monitoring dashboard. */
 export interface DashboardSettings {
   frame_width: number;
   frame_height: number;
-  analysis_cooldown_seconds: number;
   max_api_calls_per_minute: number;
 }
 
@@ -169,6 +190,8 @@ export interface DashboardAnalysis {
   observations?: string[] | null;
   recommended_action?: string | null;
   requires_human_review?: boolean | null;
+  /** Model's own independent color judgment: "verde" | "amarillo" | "naranja" | "rojo". */
+  criticidad?: string | null;
 }
 
 export interface DashboardEvent {
@@ -381,6 +404,11 @@ export function fetchLatestDetections(limit = 20): Promise<Detection[]> {
 
 export function fetchDetections(params: DetectionsListParams): Promise<DetectionsPage> {
   return request<DetectionsPage>("/detections", { query: { ...params } });
+}
+
+/** Admin-only: removes a detection from the history. Does not delete its JPEG on disk. */
+export function deleteDetection(id: string): Promise<void> {
+  return request<void>(`/detections/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function fetchAdminUsers(): Promise<AdminUserRecord[]> {

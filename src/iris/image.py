@@ -39,6 +39,39 @@ def resize_with_letterbox(frame: Frame, width: int, height: int) -> Frame:
     return canvas
 
 
+def variation_index_percent(
+    previous: Frame,
+    current: Frame,
+    *,
+    width: int,
+    height: int,
+    pixel_threshold: int,
+) -> float:
+    """Percentage of pixels whose grayscale intensity changed beyond ``pixel_threshold``.
+
+    Both frames are downscaled to ``width``x``height`` grayscale first: cheap
+    enough to run every poll cycle without competing with the full-resolution
+    capture sent to Alibaba. Used to decide whether a new frame differs enough
+    from the last one actually analyzed to be worth a fresh analysis.
+    """
+
+    if width <= 0 or height <= 0:
+        raise ImageProcessingError("El tamaño de comparación debe ser positivo.")
+    if pixel_threshold < 0:
+        raise ImageProcessingError("pixel_threshold no puede ser negativo.")
+
+    def _prepare(frame: Frame) -> np.ndarray:
+        resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        return cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY).astype(np.int16)
+
+    diff = np.abs(_prepare(current) - _prepare(previous))
+    total = diff.size
+    if total == 0:
+        return 0.0
+    changed = int(np.count_nonzero(diff > pixel_threshold))
+    return (changed / total) * 100.0
+
+
 def encode_jpeg(frame: Frame, *, quality: int = 82) -> bytes:
     if not 1 <= quality <= 100:
         raise ImageProcessingError("La calidad JPEG debe estar entre 1 y 100.")

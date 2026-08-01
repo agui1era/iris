@@ -70,7 +70,7 @@ def test_migrate_env_rejects_invalid_candidate_before_writing(
     db_path = tmp_path / "config.db"
     _write_valid_env(dotenv_path)
     with dotenv_path.open("a", encoding="utf-8") as stream:
-        stream.write("POLL_INTERVAL_SECONDS=10\n")
+        stream.write("POLL_INTERVAL_SECONDS=5\n")
 
     result = main(
         [

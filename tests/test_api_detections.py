@@ -26,7 +26,12 @@ class FakeCursor:
         self._documents = list(documents)
 
     def sort(self, field: str, direction: int) -> FakeCursor:
-        self._documents.sort(key=lambda doc: doc.get(field), reverse=direction < 0)
+        # Mirrors real MongoDB dotted-path sort (e.g. "analysis.criticidad") and
+        # tolerates documents missing the field instead of raising on mixed types.
+        self._documents.sort(
+            key=lambda doc: (_get_dotted(doc, field) is None, _get_dotted(doc, field)),
+            reverse=direction < 0,
+        )
         return self
 
     def skip(self, count: int) -> FakeCursor:
@@ -63,6 +68,11 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
     return True
 
 
+class _FakeDeleteResult:
+    def __init__(self, deleted_count: int) -> None:
+        self.deleted_count = deleted_count
+
+
 class FakeDetectionsCollection:
     """Hand-written pymongo-compatible fake over an in-memory document list."""
 
@@ -82,6 +92,13 @@ class FakeDetectionsCollection:
     def count_documents(self, query: dict[str, Any]) -> int:
         return sum(1 for doc in self._documents if _matches(doc, query))
 
+    def delete_one(self, query: dict[str, Any]) -> _FakeDeleteResult:
+        for index, document in enumerate(self._documents):
+            if _matches(document, query):
+                del self._documents[index]
+                return _FakeDeleteResult(deleted_count=1)
+        return _FakeDeleteResult(deleted_count=0)
+
 
 def _make_document(
     *,
@@ -89,6 +106,7 @@ def _make_document(
     camera_id: str = "CAM1",
     captured_at: str,
     severity: str = "high",
+    criticidad: str = "rojo",
     snapshot_path: str | None = None,
 ) -> dict[str, Any]:
     return {
@@ -108,6 +126,7 @@ def _make_document(
             "summary": "Persona visible en el suelo.",
             "confidence": 0.9,
             "recommended_action": "Solicitar revisión.",
+            "criticidad": criticidad,
         },
     }
 
@@ -117,13 +136,27 @@ def _authed_client(
 ) -> tuple[TestClient, str, Path]:
     app, users_db, capture_dir = api_app_factory()
     create_user(users_db, AUTH_HEADER_USERNAME, "s3cr3t", "normal")
-    app.dependency_overrides[get_detections_collection] = lambda: FakeDetectionsCollection(
-        documents
-    )
+    # One shared instance across requests, like a real Mongo collection handle,
+    # so mutations (e.g. delete_one) made in one request are visible in the next.
+    collection = FakeDetectionsCollection(documents)
+    app.dependency_overrides[get_detections_collection] = lambda: collection
     client = TestClient(app)
     login = client.post(
         "/auth/login", json={"username": AUTH_HEADER_USERNAME, "password": "s3cr3t"}
     )
+    token = login.json()["access_token"]
+    return client, token, capture_dir
+
+
+def _admin_authed_client(
+    api_app_factory: Callable, documents: list[dict[str, Any]]
+) -> tuple[TestClient, str, Path]:
+    app, users_db, capture_dir = api_app_factory()
+    create_user(users_db, "admin-user", "s3cr3t", "admin")
+    collection = FakeDetectionsCollection(documents)
+    app.dependency_overrides[get_detections_collection] = lambda: collection
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin-user", "password": "s3cr3t"})
     token = login.json()["access_token"]
     return client, token, capture_dir
 
@@ -402,7 +435,8 @@ def test_detection_image_unknown_id_returns_404(api_app_factory: Callable) -> No
 
 def test_detections_endpoints_do_not_require_admin_role(api_app_factory: Callable) -> None:
     # Any authenticated role (including 'normal') can read detections; there's
-    # no admin-only gate on this router.
+    # no admin-only gate on the read endpoints of this router (DELETE is
+    # admin-only, see test_delete_detection_*).
     documents = [_make_document(captured_at="2026-07-01T10:00:00+00:00")]
     client, token, _ = _authed_client(api_app_factory, documents)
 
@@ -425,3 +459,158 @@ def test_detections_return_503_when_mongo_not_configured_and_no_override(
     response = client.get("/detections/latest", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 503
+
+
+def test_list_detections_defaults_to_captured_at_descending(api_app_factory: Callable) -> None:
+    documents = [
+        _make_document(captured_at="2026-07-01T10:00:00+00:00"),
+        _make_document(captured_at="2026-07-03T10:00:00+00:00"),
+        _make_document(captured_at="2026-07-02T10:00:00+00:00"),
+    ]
+    client, token, _ = _authed_client(api_app_factory, documents)
+
+    response = client.get("/detections", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    dates = [item["captured_at"] for item in response.json()["items"]]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_list_detections_sort_order_asc_reverses_default(api_app_factory: Callable) -> None:
+    documents = [
+        _make_document(captured_at="2026-07-01T10:00:00+00:00"),
+        _make_document(captured_at="2026-07-03T10:00:00+00:00"),
+        _make_document(captured_at="2026-07-02T10:00:00+00:00"),
+    ]
+    client, token, _ = _authed_client(api_app_factory, documents)
+
+    response = client.get(
+        "/detections?sort_order=asc", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    dates = [item["captured_at"] for item in response.json()["items"]]
+    assert dates == sorted(dates)
+
+
+def test_list_detections_sort_by_camera_id(api_app_factory: Callable) -> None:
+    documents = [
+        _make_document(camera_id="CAM3", captured_at="2026-07-01T10:00:00+00:00"),
+        _make_document(camera_id="CAM1", captured_at="2026-07-02T10:00:00+00:00"),
+        _make_document(camera_id="CAM2", captured_at="2026-07-03T10:00:00+00:00"),
+    ]
+    client, token, _ = _authed_client(api_app_factory, documents)
+
+    response = client.get(
+        "/detections?sort_by=camera_id&sort_order=asc",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert [item["camera_id"] for item in response.json()["items"]] == ["CAM1", "CAM2", "CAM3"]
+
+
+def test_list_detections_sort_by_criticidad(api_app_factory: Callable) -> None:
+    documents = [
+        _make_document(criticidad="rojo", captured_at="2026-07-01T10:00:00+00:00"),
+        _make_document(criticidad="amarillo", captured_at="2026-07-02T10:00:00+00:00"),
+        _make_document(criticidad="verde", captured_at="2026-07-03T10:00:00+00:00"),
+    ]
+    client, token, _ = _authed_client(api_app_factory, documents)
+
+    response = client.get(
+        "/detections?sort_by=criticidad&sort_order=asc",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    # Alphabetical, since the fake sorts the raw string like Mongo would.
+    assert [item["criticidad"] for item in response.json()["items"]] == [
+        "amarillo",
+        "rojo",
+        "verde",
+    ]
+
+
+def test_list_detections_filters_by_criticidad(api_app_factory: Callable) -> None:
+    documents = [
+        _make_document(criticidad="rojo", captured_at="2026-07-01T10:00:00+00:00"),
+        _make_document(criticidad="verde", captured_at="2026-07-02T10:00:00+00:00"),
+    ]
+    client, token, _ = _authed_client(api_app_factory, documents)
+
+    response = client.get(
+        "/detections?criticidad=rojo", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["criticidad"] == "rojo"
+
+
+def test_list_detections_rejects_invalid_sort_by(api_app_factory: Callable) -> None:
+    client, token, _ = _authed_client(api_app_factory, [])
+
+    response = client.get(
+        "/detections?sort_by=rtsp_url", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_list_detections_rejects_invalid_sort_order(api_app_factory: Callable) -> None:
+    client, token, _ = _authed_client(api_app_factory, [])
+
+    response = client.get(
+        "/detections?sort_order=sideways", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_admin_can_delete_a_detection(api_app_factory: Callable) -> None:
+    target = _make_document(captured_at="2026-07-01T10:00:00+00:00")
+    documents = [target, _make_document(captured_at="2026-07-02T10:00:00+00:00")]
+    client, token, _ = _admin_authed_client(api_app_factory, documents)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.delete(f"/detections/{target['_id']}", headers=headers)
+    assert response.status_code == 204
+
+    remaining = client.get("/detections", headers=headers).json()
+    assert remaining["total"] == 1
+    assert target["_id"] not in [item["id"] for item in remaining["items"]]
+
+
+def test_delete_detection_requires_admin_role(api_app_factory: Callable) -> None:
+    target = _make_document(captured_at="2026-07-01T10:00:00+00:00")
+    client, token, _ = _authed_client(api_app_factory, [target])
+
+    response = client.delete(
+        f"/detections/{target['_id']}", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 403
+
+
+def test_delete_unknown_detection_returns_404(api_app_factory: Callable) -> None:
+    client, token, _ = _admin_authed_client(api_app_factory, [])
+
+    response = client.delete(
+        f"/detections/{ObjectId()}", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_delete_detection_invalid_id_format_returns_404_not_500(
+    api_app_factory: Callable,
+) -> None:
+    client, token, _ = _admin_authed_client(api_app_factory, [])
+
+    response = client.delete(
+        "/detections/not-a-valid-object-id", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 404

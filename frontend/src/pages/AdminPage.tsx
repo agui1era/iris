@@ -50,6 +50,7 @@ export function AdminPage() {
   const [newCameraRtspUrl, setNewCameraRtspUrl] = useState("");
   const [newCameraPrompt, setNewCameraPrompt] = useState("");
   const [newCameraPollInterval, setNewCameraPollInterval] = useState("30");
+  const [newCameraNotificationThreshold, setNewCameraNotificationThreshold] = useState("high");
   const [createCameraError, setCreateCameraError] = useState<string | null>(null);
   const [creatingCamera, setCreatingCamera] = useState(false);
 
@@ -58,6 +59,7 @@ export function AdminPage() {
   const [editCameraRtspUrl, setEditCameraRtspUrl] = useState("");
   const [editCameraPrompt, setEditCameraPrompt] = useState("");
   const [editCameraPollInterval, setEditCameraPollInterval] = useState("30");
+  const [editCameraNotificationThreshold, setEditCameraNotificationThreshold] = useState("high");
   const [editCameraError, setEditCameraError] = useState<string | null>(null);
   const [savingCamera, setSavingCamera] = useState(false);
 
@@ -165,9 +167,10 @@ export function AdminPage() {
         frame_width: settings.frame_width,
         frame_height: settings.frame_height,
         jpeg_quality: settings.jpeg_quality,
-        analysis_cooldown_seconds: settings.analysis_cooldown_seconds,
         max_api_calls_per_minute: settings.max_api_calls_per_minute,
         save_image_min_severity: settings.save_image_min_severity,
+        change_threshold_percent: settings.change_threshold_percent,
+        telegram_enabled: settings.telegram_enabled,
         alibaba_base_url: settings.alibaba_base_url,
         alibaba_model: settings.alibaba_model,
         alibaba_timeout_seconds: settings.alibaba_timeout_seconds,
@@ -221,6 +224,7 @@ export function AdminPage() {
         rtsp_url: newCameraRtspUrl,
         prompt: newCameraPrompt,
         poll_interval_seconds: Number(newCameraPollInterval),
+        notification_threshold: newCameraNotificationThreshold,
       };
 
       await createAdminCamera(payload);
@@ -229,6 +233,7 @@ export function AdminPage() {
       setNewCameraRtspUrl("");
       setNewCameraPrompt("");
       setNewCameraPollInterval("30");
+      setNewCameraNotificationThreshold("high");
     } catch (err) {
       setCreateCameraError(err instanceof ApiError ? err.message : "No se pudo crear la cámara.");
     } finally {
@@ -242,6 +247,7 @@ export function AdminPage() {
     setEditCameraRtspUrl(camera.rtsp_url);
     setEditCameraPrompt(camera.prompt);
     setEditCameraPollInterval(String(camera.poll_interval_seconds));
+    setEditCameraNotificationThreshold(camera.notification_threshold);
     setEditCameraError(null);
   };
 
@@ -262,6 +268,7 @@ export function AdminPage() {
       if (editCameraPollInterval.trim() !== "") {
         payload.poll_interval_seconds = Number(editCameraPollInterval);
       }
+      payload.notification_threshold = editCameraNotificationThreshold;
 
       await updateAdminCamera(index, payload);
       await loadCameras();
@@ -486,7 +493,7 @@ export function AdminPage() {
                                 <div className="input-with-unit">
                                   <input
                                     type="number"
-                                    min="30"
+                                    min="10"
                                     step="1"
                                     value={editCameraPollInterval}
                                     onChange={(event) =>
@@ -499,6 +506,25 @@ export function AdminPage() {
                                 <span className="field-hint">
                                   RTSP se lee en paralelo; Alibaba procesa una solicitud global a la
                                   vez.
+                                </span>
+                              </label>
+                              <label className="field">
+                                <span>Umbral de notificación</span>
+                                <select
+                                  value={editCameraNotificationThreshold}
+                                  onChange={(event) =>
+                                    setEditCameraNotificationThreshold(event.target.value)
+                                  }
+                                >
+                                  {SEVERITY_LEVELS.map((level) => (
+                                    <option key={level} value={level}>
+                                      {level}
+                                    </option>
+                                  ))}
+                                </select>
+                                <span className="field-hint">
+                                  Severidad mínima para notificar (Telegram, próximamente). Por
+                                  ahora sólo guarda el umbral.
                                 </span>
                               </label>
                               <div className="camera-edit-actions">
@@ -601,7 +627,7 @@ export function AdminPage() {
               <div className="input-with-unit">
                 <input
                   type="number"
-                  min="30"
+                  min="10"
                   step="1"
                   value={newCameraPollInterval}
                   onChange={(event) => setNewCameraPollInterval(event.target.value)}
@@ -611,6 +637,23 @@ export function AdminPage() {
               </div>
               <span className="field-hint">
                 RTSP se lee en paralelo; Alibaba procesa una solicitud global a la vez.
+              </span>
+            </label>
+            <label className="field">
+              <span>Umbral de notificación</span>
+              <select
+                value={newCameraNotificationThreshold}
+                onChange={(event) => setNewCameraNotificationThreshold(event.target.value)}
+              >
+                {SEVERITY_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                Severidad mínima para notificar (Telegram, próximamente). Por ahora sólo guarda el
+                umbral.
               </span>
             </label>
           </div>
@@ -746,22 +789,6 @@ export function AdminPage() {
                 </p>
                 <div className="settings-field-grid">
                   <label className="field">
-                    <span>Cooldown de análisis</span>
-                    <div className="input-with-unit">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={settings.analysis_cooldown_seconds}
-                        onChange={(event) =>
-                          updateSetting("analysis_cooldown_seconds", Number(event.target.value))
-                        }
-                        required
-                      />
-                      <span>seg</span>
-                    </div>
-                  </label>
-                  <label className="field">
                     <span>Límite de llamadas</span>
                     <div className="input-with-unit">
                       <input
@@ -791,6 +818,47 @@ export function AdminPage() {
                         </option>
                       ))}
                     </select>
+                  </label>
+                  <label className="field">
+                    <span>Umbral de variación</span>
+                    <div className="input-with-unit">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        value={settings.change_threshold_percent}
+                        onChange={(event) =>
+                          updateSetting("change_threshold_percent", Number(event.target.value))
+                        }
+                        required
+                      />
+                      <span>%</span>
+                    </div>
+                    <span className="field-hint">
+                      0 analiza siempre. Por encima de 0, un frame que varía menos que este
+                      porcentaje respecto al último analizado se omite — salvo que la última
+                      severidad conocida de esa cámara sea media o superior, en cuyo caso siempre
+                      se reanaliza.
+                    </span>
+                  </label>
+                  <label className="field checkbox-field">
+                    <span>
+                      <input
+                        type="checkbox"
+                        checked={settings.telegram_enabled}
+                        onChange={(event) =>
+                          updateSetting("telegram_enabled", event.target.checked)
+                        }
+                      />
+                      Notificaciones Telegram
+                    </span>
+                    <span className="field-hint">
+                      {settings.telegram_configured
+                        ? "Bot y chat configurados. Desmarcar apaga el envío sin borrar las credenciales."
+                        : "Todavía no hay bot/chat configurados (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, sólo por entorno); este interruptor no tiene efecto hasta que existan."}
+                      {" "}Notifica por cámara según su umbral configurado.
+                    </span>
                   </label>
                 </div>
               </fieldset>

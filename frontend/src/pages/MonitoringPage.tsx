@@ -6,6 +6,7 @@ import {
   type DashboardCamera,
   type DashboardResponse,
 } from "../api/client";
+import { CriticalityBadge } from "../components/CriticalityBadge";
 import { DashboardCapture } from "../components/DashboardCapture";
 import { SeverityBadge } from "../components/SeverityBadge";
 
@@ -273,7 +274,7 @@ export function MonitoringPage() {
             {metrics.pollingRange}
             <small> s</small>
           </strong>
-          <span className="metric-foot muted">mínimo 30 s · interfaz cada 3 s</span>
+          <span className="metric-foot muted">mínimo 10 s · interfaz cada 3 s</span>
         </div>
       </section>
 
@@ -284,6 +285,11 @@ export function MonitoringPage() {
           <strong> Confianza</strong> indica cuán seguro está el modelo de su lectura; es una medida
           separada y no equivale a riesgo. Bandas: 0–9 sin riesgo, 10–29 informativa, 30–49 baja,
           50–69 media, 70–89 alta y 90–100 crítica.
+          <strong> Severidad</strong> (badge izquierdo) la calcula IRIS siempre a partir del risk
+          score. <strong>Criticidad</strong> (badge derecho, verde/amarillo/naranja/rojo) es la
+          lectura propia e independiente del modelo sobre la misma escena; se muestra a título
+          informativo y nunca reemplaza a la severidad. Negro significa que todavía no hay
+          análisis para esa cámara.
         </p>
       </div>
 
@@ -377,7 +383,10 @@ export function MonitoringPage() {
                       </span>
                       <strong>{analysis?.event ?? "Sin análisis todavía"}</strong>
                     </div>
-                    <SeverityBadge severity={severity} />
+                    <div className="badge-group">
+                      <SeverityBadge severity={severity} />
+                      <CriticalityBadge criticidad={analysis?.criticidad} />
+                    </div>
                   </div>
 
                   {analysisState.note && (

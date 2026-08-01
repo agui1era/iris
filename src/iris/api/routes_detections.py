@@ -5,16 +5,21 @@ from typing import Annotated, Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .security import CurrentUser
+from .security import AdminUser, CurrentUser
 
 router = APIRouter()
 
 _MAX_LATEST_LIMIT = 200
 _MAX_PAGE_SIZE = 200
+_SORT_FIELDS = {
+    "captured_at": "captured_at",
+    "camera_id": "camera_id",
+    "criticidad": "analysis.criticidad",
+}
 
 
 def get_detections_collection(request: Request) -> Any:
@@ -55,6 +60,7 @@ def _project_document(document: dict[str, Any]) -> dict[str, Any]:
         "summary": analysis.get("summary"),
         "confidence": analysis.get("confidence"),
         "recommended_action": analysis.get("recommended_action"),
+        "criticidad": analysis.get("criticidad"),
         "has_image": bool(document.get("snapshot_path")),
     }
 
@@ -89,9 +95,19 @@ def list_detections(
     date_to: str | None = None,
     camera_id: str | None = None,
     severity: str | None = None,
+    criticidad: str | None = None,
+    sort_by: str = "captured_at",
+    sort_order: str = "desc",
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1),
 ) -> DetectionsPage:
+    if sort_by not in _SORT_FIELDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"sort_by debe ser uno de: {', '.join(_SORT_FIELDS)}.",
+        )
+    if sort_order not in {"asc", "desc"}:
+        raise HTTPException(status_code=422, detail="sort_order debe ser 'asc' o 'desc'.")
     capped_page_size = min(page_size, _MAX_PAGE_SIZE)
 
     query: dict[str, Any] = {"event_type": "analysis.completed"}
@@ -99,6 +115,8 @@ def list_detections(
         query["camera_id"] = camera_id
     if severity:
         query["analysis.severity"] = severity
+    if criticidad:
+        query["analysis.criticidad"] = criticidad
     captured_range: dict[str, Any] = {}
     if date_from:
         captured_range["$gte"] = date_from
@@ -109,9 +127,38 @@ def list_detections(
 
     total = collection.count_documents(query)
     skip = (page - 1) * capped_page_size
-    cursor = collection.find(query).sort("captured_at", -1).skip(skip).limit(capped_page_size)
+    direction = 1 if sort_order == "asc" else -1
+    cursor = (
+        collection.find(query)
+        .sort(_SORT_FIELDS[sort_by], direction)
+        .skip(skip)
+        .limit(capped_page_size)
+    )
     items = [_project_document(document) for document in cursor]
     return DetectionsPage(items=items, total=total, page=page, page_size=capped_page_size)
+
+
+@router.delete("/{detection_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_detection(
+    detection_id: str,
+    collection: DetectionsCollection,
+    admin: AdminUser,
+) -> Response:
+    """Elimina una detección del historial. Sólo admin; no borra el JPEG asociado."""
+
+    try:
+        object_id = ObjectId(detection_id)
+    except (InvalidId, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Detección no encontrada."
+        ) from exc
+
+    result = collection.delete_one({"_id": object_id})
+    if getattr(result, "deleted_count", 0) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Detección no encontrada."
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{detection_id}/image")

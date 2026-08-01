@@ -78,6 +78,19 @@ class MemoryEventSink:
         self.events.append(event)
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.closed = False
+
+    def send_photo(self, jpeg: bytes, *, caption: str) -> bool:
+        self.calls.append({"jpeg": jpeg, "caption": caption})
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class MemoryCaptureStore:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -177,7 +190,6 @@ def make_config() -> ServiceConfig:
         poll_interval_seconds=1.0,
         reconnect_interval_seconds=1.0,
         frame_stale_after_seconds=60.0,
-        analysis_cooldown_seconds=0.0,
         max_api_calls_per_minute=0,
         max_frame_pixels=2_621_440,
         jpeg_quality=85,
@@ -683,87 +695,6 @@ def test_event_sink_failure_does_not_block_later_poll_frames(
     assert service._states[0].last_seen_sequence == 2
 
 
-def test_cooldown_keeps_candidate_pending_until_interval_expires(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = [0.0]
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: clock[0])
-    config = replace(make_config(), analysis_cooldown_seconds=15.0)
-    first = np.zeros((8, 8, 3), dtype=np.uint8)
-    changed = np.full((8, 8, 3), 255, dtype=np.uint8)
-    executors: list[InlineExecutor] = []
-    monkeypatch.setattr(
-        service_module,
-        "ThreadPoolExecutor",
-        lambda *args, **kwargs: executors.append(InlineExecutor()) or executors[-1],
-    )
-    analyzer = FakeAnalyzer([make_result("first"), make_result("changed")])
-    service = MonitoringService(
-        config,
-        analyzer,
-        readers=[SequenceReader(make_snapshots([first, changed]))],
-        event_sink=MemoryEventSink(),
-        capture_store=MemoryCaptureStore(),
-    )
-
-    service.poll_once()
-    clock[0] = 1.0
-    service.poll_once()
-    assert len(analyzer.calls) == 1
-    assert service._states[0].pending is not None
-
-    clock[0] = 15.0
-    service._try_schedule_pending(service._states[0])
-
-    assert len(analyzer.calls) == 2
-    assert service._states[0].pending is None
-
-
-def test_expired_cooldown_dispatches_newest_frame_instead_of_older_pending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = [0.0]
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: clock[0])
-    config = replace(make_config(), analysis_cooldown_seconds=15.0)
-    frames = [
-        np.zeros((8, 8, 3), dtype=np.uint8),
-        np.full((8, 8, 3), 80, dtype=np.uint8),
-        np.full((8, 8, 3), 255, dtype=np.uint8),
-    ]
-    executors: list[InlineExecutor] = []
-    monkeypatch.setattr(
-        service_module,
-        "ThreadPoolExecutor",
-        lambda *args, **kwargs: executors.append(InlineExecutor()) or executors[-1],
-    )
-    analyzer = FakeAnalyzer(
-        [
-            make_result("baseline", severity="critical"),
-            make_result("newest", severity="critical"),
-        ]
-    )
-    captures = MemoryCaptureStore()
-    service = MonitoringService(
-        config,
-        analyzer,
-        readers=[SequenceReader(make_snapshots(frames))],
-        event_sink=MemoryEventSink(),
-        capture_store=captures,
-    )
-
-    service.poll_once()
-    clock[0] = 1.0
-    service.poll_once()
-    assert service._states[0].pending is not None
-    assert service._states[0].pending.snapshot.sequence == 2
-
-    clock[0] = 15.0
-    service.poll_once()
-
-    assert [call["sequence"] for call in captures.calls] == [1, 3]
-    assert service._states[0].pending is None
-
-
 def test_stale_pending_frame_is_discarded_before_api_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -964,3 +895,216 @@ def test_run_retries_quickly_when_reader_has_no_frame_on_first_poll(
 
     assert len(analyzer.calls) == 1
     assert not thread.is_alive()
+
+
+def _variation_gate_config(**overrides: Any) -> ServiceConfig:
+    return replace(
+        make_config(),
+        change_threshold_percent=10.0,
+        delta_width=4,
+        delta_height=4,
+        pixel_change_threshold=24,
+        **overrides,
+    )
+
+
+def _inline_executor_patch(monkeypatch: pytest.MonkeyPatch) -> list[InlineExecutor]:
+    executors: list[InlineExecutor] = []
+    monkeypatch.setattr(
+        service_module,
+        "ThreadPoolExecutor",
+        lambda *args, **kwargs: executors.append(InlineExecutor()) or executors[-1],
+    )
+    return executors
+
+
+def test_change_threshold_percent_zero_disables_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inline_executor_patch(monkeypatch)
+    calm = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("a", severity="none"), make_result("b", severity="none")])
+    service = MonitoringService(
+        make_config(),  # change_threshold_percent defaults to 0.0 (feature off)
+        analyzer,
+        readers=[SequenceReader(make_snapshots([calm, calm]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+    )
+
+    service.poll_once()
+    service.poll_once()
+
+    assert len(analyzer.calls) == 2
+
+
+def test_skips_analysis_when_variation_below_threshold_and_last_severity_is_calm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    calm = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("calm", severity="none")])
+    events = MemoryEventSink()
+    captures = MemoryCaptureStore()
+    service = MonitoringService(
+        _variation_gate_config(),
+        analyzer,
+        readers=[SequenceReader(make_snapshots([calm, calm]))],
+        event_sink=events,
+        capture_store=captures,
+    )
+
+    service.poll_once()  # first frame ever: no baseline to compare against, always analyzed
+    service.poll_once()  # identical frame, last severity calm -> skipped
+
+    assert len(analyzer.calls) == 1
+    assert len(captures.latest_calls) == 2  # operational preview keeps updating on skip
+    assert [event["event_type"] for event in events.events] == [
+        "analysis.completed",
+        "analysis.skipped",
+    ]
+    skipped = events.events[1]
+    assert skipped["variation_index_percent"] == pytest.approx(0.0)
+    assert skipped["change_threshold_percent"] == pytest.approx(10.0)
+
+
+def test_does_not_skip_when_last_severity_is_medium_or_above(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    calm = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer(
+        [make_result("fall", severity="high"), make_result("still on the floor", severity="high")]
+    )
+    events = MemoryEventSink()
+    service = MonitoringService(
+        _variation_gate_config(),
+        analyzer,
+        readers=[SequenceReader(make_snapshots([calm, calm]))],
+        event_sink=events,
+        capture_store=MemoryCaptureStore(),
+    )
+
+    service.poll_once()
+    service.poll_once()
+
+    # A stationary emergency (identical frames, high severity) must never be
+    # silently skipped just because pixel variation is low.
+    assert len(analyzer.calls) == 2
+    assert [event["event_type"] for event in events.events] == [
+        "analysis.completed",
+        "analysis.completed",
+    ]
+
+
+def test_reanalyzes_when_variation_exceeds_threshold_despite_calm_last_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    calm = np.zeros((8, 8, 3), dtype=np.uint8)
+    changed = np.full((8, 8, 3), 255, dtype=np.uint8)
+    analyzer = FakeAnalyzer(
+        [make_result("calm", severity="none"), make_result("changed", severity="none")]
+    )
+    service = MonitoringService(
+        _variation_gate_config(),
+        analyzer,
+        readers=[SequenceReader(make_snapshots([calm, changed]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+    )
+
+    service.poll_once()
+    service.poll_once()
+
+    assert len(analyzer.calls) == 2
+
+
+def test_notifies_telegram_when_severity_meets_camera_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(make_config().cameras[0], notification_threshold="high")
+    config = replace(make_config(), cameras=(camera,))
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("posible caída", severity="high")])
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        config,
+        analyzer,
+        readers=[SequenceReader(make_snapshots([frame]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    service.poll_once()
+
+    assert len(notifier.calls) == 1
+    assert "posible caída" in notifier.calls[0]["caption"]
+    assert camera.name in notifier.calls[0]["caption"]
+
+
+def test_does_not_notify_below_camera_notification_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(make_config().cameras[0], notification_threshold="high")
+    config = replace(make_config(), cameras=(camera,))
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("nada relevante", severity="low")])
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        config,
+        analyzer,
+        readers=[SequenceReader(make_snapshots([frame]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    service.poll_once()
+
+    assert notifier.calls == []
+
+
+def test_no_notifier_configured_never_calls_telegram(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inline_executor_patch(monkeypatch)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("posible caída", severity="critical")])
+    service = MonitoringService(
+        make_config(),  # no telegram_bot_token/telegram_chat_id -> notifier is None
+        analyzer,
+        readers=[SequenceReader(make_snapshots([frame]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+    )
+
+    service.poll_once()  # must not raise even though no notifier is configured
+
+    assert len(analyzer.calls) == 1
+
+
+def test_telegram_enabled_false_disables_sending_even_with_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    config = replace(
+        make_config(),
+        telegram_enabled=False,
+        telegram_bot_token="fake-token",
+        telegram_chat_id="fake-chat",
+    )
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    analyzer = FakeAnalyzer([make_result("posible caída", severity="critical")])
+    service = MonitoringService(
+        config,
+        analyzer,
+        readers=[SequenceReader(make_snapshots([frame]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+    )
+
+    assert service._notifier is None
+
+    service.poll_once()  # must not attempt any real network call
+
+    assert len(analyzer.calls) == 1

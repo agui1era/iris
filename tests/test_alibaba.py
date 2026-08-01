@@ -73,6 +73,7 @@ def care_analysis(**overrides: Any) -> dict[str, Any]:
         "observations": [],
         "recommended_action": "Ninguna",
         "requires_human_review": False,
+        "criticidad": "verde",
     }
     analysis.update(overrides)
     return analysis
@@ -83,6 +84,7 @@ def successful_response() -> httpx.Response:
         alert=True,
         severity="critical",
         risk_score=9,
+        criticidad="rojo",
     )
     return httpx.Response(
         200,
@@ -124,6 +126,7 @@ def test_analyze_builds_openai_compatible_multimodal_payload_and_parses_result()
         "observations": [],
         "recommended_action": "Ninguna",
         "requires_human_review": False,
+        "criticidad": "rojo",
     }
     assert result.model == "qwen-response"
     assert result.usage == {"prompt_tokens": 10, "completion_tokens": 5}
@@ -153,7 +156,19 @@ def test_analyze_builds_openai_compatible_multimodal_payload_and_parses_result()
     assert "fecha_hora_utc: 2026-07-27T12:34:56+00:00" in technical_text
     assert "risk_score debe ser un entero entre 0 y 100" in technical_text
     assert "confidence debe permanecer entre 0 y 1" in technical_text
+    assert "qué tan bien pudiste interpretar la escena" in technical_text
+    assert "observations/summary son vagos o inciertos" in technical_text
     assert "variacion" not in technical_text.lower()
+    assert "criticidad" in technical_text
+    assert '"verde"' in technical_text
+    assert '"amarillo"' in technical_text
+    assert '"naranja"' in technical_text
+    assert '"rojo"' in technical_text
+    assert "0-9=none, 10-29=info, 30-49=low, 50-69=medium, 70-89=high, 90-100=critical" in (
+        technical_text
+    )
+    assert "Riesgo X/100" in technical_text
+    assert "2-3 oraciones" in technical_text
 
 
 @pytest.mark.parametrize(
@@ -239,6 +254,43 @@ def test_confidence_still_must_be_a_number_between_zero_and_one(
 
     with pytest.raises(AlibabaAPIError, match="confidence fuera de 0..1"):
         _json_from_text(json.dumps(model_analysis))
+
+
+@pytest.mark.parametrize(
+    "invalid_criticidad",
+    [None, "", "  ", "azul", "critico", 1, True, ["rojo"]],
+)
+def test_rejects_criticidad_outside_the_four_allowed_colors(invalid_criticidad: Any) -> None:
+    model_analysis = care_analysis(criticidad=invalid_criticidad)
+
+    with pytest.raises(AlibabaAPIError, match="criticidad"):
+        _json_from_text(json.dumps(model_analysis))
+
+
+def test_criticidad_missing_entirely_is_rejected() -> None:
+    model_analysis = care_analysis()
+    model_analysis.pop("criticidad")
+
+    with pytest.raises(AlibabaAPIError, match="criticidad"):
+        _json_from_text(json.dumps(model_analysis))
+
+
+@pytest.mark.parametrize(
+    ("raw_criticidad", "expected"),
+    [
+        ("verde", "verde"),
+        ("VERDE", "verde"),
+        (" Amarillo ", "amarillo"),
+        ("NARANJA", "naranja"),
+        ("Rojo", "rojo"),
+    ],
+)
+def test_criticidad_is_normalized_to_lowercase(raw_criticidad: str, expected: str) -> None:
+    model_analysis = care_analysis(criticidad=raw_criticidad)
+
+    parsed = _json_from_text(json.dumps(model_analysis))
+
+    assert parsed["criticidad"] == expected
 
 
 def test_retries_retryable_responses_using_retry_after_then_exponential_backoff() -> None:
@@ -349,7 +401,7 @@ def test_analyze_normalizes_null_event_to_none() -> None:
                                     '"event":null,'
                                     '"confidence":0.98,"summary":"Sin novedad",'
                                     '"observations":[],"recommended_action":"Ninguna",'
-                                    '"requires_human_review":false}'
+                                    '"requires_human_review":false,"criticidad":"verde"}'
                                 )
                             },
                         }
@@ -396,7 +448,7 @@ def test_analyze_normalizes_non_list_or_mixed_observations(
                                     '"confidence":0.98,"summary":"Sin novedad",'
                                     f'"observations":{raw_observations},'
                                     '"recommended_action":"Ninguna",'
-                                    '"requires_human_review":false}'
+                                    '"requires_human_review":false,"criticidad":"verde"}'
                                 )
                             },
                         }

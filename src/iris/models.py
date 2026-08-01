@@ -20,6 +20,10 @@ class CameraConfig:
     rtsp_url: str = field(repr=False)
     prompt: str = field(repr=False)
     poll_interval_seconds: float = 30.0
+    # Severidad mínima para disparar una notificación (Telegram u otro canal)
+    # de esta cámara. Sólo el umbral se persiste hoy; el envío en sí todavía
+    # no está implementado.
+    notification_threshold: str = "high"
 
     @property
     def identifier(self) -> str:
@@ -41,7 +45,6 @@ class ServiceConfig:
     poll_interval_seconds: float
     reconnect_interval_seconds: float
     frame_stale_after_seconds: float
-    analysis_cooldown_seconds: float
     max_api_calls_per_minute: int
     max_frame_pixels: int
     jpeg_quality: int
@@ -60,9 +63,20 @@ class ServiceConfig:
     cameras: tuple[CameraConfig, ...]
     alibaba: AlibabaConfig
     save_image_min_severity: str = "high"
+    change_threshold_percent: float = 0.0
+    pixel_change_threshold: int = 24
+    delta_width: int = 160
+    delta_height: int = 90
     mongo_uri: str | None = None
     mongo_database: str = "iris"
     mongo_detection_collection: str = "iris_detections"
+    # Un único bot/chat global; qué cámara notifica lo decide su propio
+    # notification_threshold. Sin ambas variables, el envío queda desactivado.
+    # telegram_enabled es un interruptor maestro aparte: permite guardar
+    # credenciales sin activar el envío todavía.
+    telegram_enabled: bool = True
+    telegram_bot_token: str | None = field(default=None, repr=False)
+    telegram_chat_id: str | None = None
     auth_jwt_secret: str | None = None
     auth_jwt_expires_minutes: int = 480
     api_cors_origins: tuple[str, ...] = ("http://localhost:5173",)

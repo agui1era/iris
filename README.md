@@ -1,15 +1,15 @@
 # IRIS
 
-Servicio de monitoreo semántico multi-cámara para apoyar el cuidado de adultos
-mayores. Lee streams RTSP y, cada 30 segundos o más, extrae una captura a la
-resolución global configurada y la consulta en Alibaba Model Studio.
+Servicio de monitoreo semántico multi-cámara. Lee streams RTSP y, cada 10
+segundos o más, extrae una captura a la resolución global configurada y la
+consulta en Alibaba Model Studio.
 
 ```text
 RTSP CAM1..N
      │
      ▼
 lectores paralelos ──► último frame por cámara (buffer de tamaño 1)
-                         │ polling por cámara (mínimo 30 s, escalonado)
+                         │ polling por cámara (mínimo 10 s, escalonado)
                          ▼
               resize con aspecto preservado
                          │
@@ -29,21 +29,21 @@ lectores paralelos ──► último frame por cámara (buffer de tamaño 1)
 ## Comportamiento
 
 - Descubre dinámicamente cámaras desde `.env` mediante `CAMn_RTSP_URL`.
-- `CAMn_POLL_INTERVAL_SECONDS` fija el ritmo de cada cámara. Su mínimo y
-  default es 30 segundos.
+- `CAMn_POLL_INTERVAL_SECONDS` fija el ritmo de cada cámara. Su mínimo es 10
+  segundos; el default es 30.
 - `FRAME_WIDTH` y `FRAME_HEIGHT` fijan una única resolución para todas las
   capturas. Cada cámara configura nombre, URL RTSP, prompt e intervalo.
 - Conserva sólo el frame más nuevo de cada RTSP: no acumula video ni analiza
   frames atrasados.
-- Cada frame RTSP fresco encontrado al llegar su turno se analiza, aunque la
-  escena sea visualmente igual a la anterior. Una secuencia RTSP repetida no se
-  envía dos veces.
+- Cada frame RTSP fresco encontrado al llegar su turno se analiza por defecto,
+  aunque la escena sea visualmente igual a la anterior (`CHANGE_THRESHOLD_PERCENT=0`).
+  Una secuencia RTSP repetida no se envía dos veces.
 - Los lectores RTSP trabajan en paralelo, pero Alibaba procesa como máximo una
   solicitud global a la vez. El primer ciclo se escalona entre cámaras y cada
   una conserva, como máximo, su frame pendiente más nuevo.
 - Si el primer intento ocurre antes de que RTSP entregue imagen, reintenta cada
   segundo hasta obtenerla; recién entonces comienza el intervalo normal.
-- Aplica un cooldown por cámara y un presupuesto global de llamadas por minuto.
+- Aplica un presupuesto global de llamadas por minuto.
 - Reconecta una cámara caída sin detener las demás.
 - Persiste la configuración editable en SQLite con revisión atómica y la
   recarga sin solapar generaciones de lectores RTSP.
@@ -54,9 +54,38 @@ lectores paralelos ──► último frame por cámara (buffer de tamaño 1)
   funciona incluso si la API semántica falla.
 - Nunca registra la URL RTSP ni la API key.
 
-No existe gating por delta ni un índice de variación. La protección principal
-contra saturación es el polling mínimo de 30 segundos, complementado por
-serialización global, cooldown y presupuesto de llamadas.
+La protección principal contra saturación es el polling mínimo de 10 segundos,
+complementado por la serialización global (una sola solicitud activa a la vez)
+y el presupuesto de llamadas por minuto.
+
+### Gating por variación (opcional)
+
+Con `CHANGE_THRESHOLD_PERCENT` en `0` (default), todo frame fresco se analiza
+siempre. Configurado por encima de `0`, IRIS puede evitar llamar a Alibaba
+cuando la escena no cambió lo suficiente desde el último frame realmente
+analizado por esa cámara:
+
+- Compara el frame nuevo contra el último frame *analizado* (no el último
+  capturado) en escala de grises, reducido a `DELTA_WIDTH`x`DELTA_HEIGHT`
+  píxeles. Cuenta qué porcentaje de píxeles cambió más de
+  `PIXEL_CHANGE_THRESHOLD` (0-255) y lo compara contra
+  `CHANGE_THRESHOLD_PERCENT`.
+- Si la variación queda por debajo del umbral, **omite la llamada a Alibaba**
+  para ese frame: no se gasta cupo de RPM ni se genera un nuevo evento
+  semántico. `latest.jpg` igual se actualiza (la vista operativa siempre
+  muestra el frame más reciente) y queda un evento liviano
+  `analysis.skipped` con `variation_index_percent` para trazabilidad.
+- **Resguardo de seguridad**: sólo se permite omitir el análisis si la
+  *última severidad confirmada* de esa cámara fue `none`, `info` o `low`. En
+  cuanto una cámara registra `medium` o superior, cada frame fresco se
+  vuelve a analizar sin importar cuánto varíe la imagen — así una situación
+  crítica que se mantiene estable visualmente (una persona inmóvil, un foco
+  de riesgo que no se mueve) nunca deja de re-evaluarse. Tampoco se omite
+  jamás el primer frame de una cámara, al no existir todavía una base de
+  comparación.
+- El umbral (`change_threshold_percent`) es ajustable desde Administración;
+  `PIXEL_CHANGE_THRESHOLD`, `DELTA_WIDTH` y `DELTA_HEIGHT` sólo se configuran
+  por entorno (afinación interna, no expuesta en el dashboard).
 
 ## Inicio rápido
 
@@ -90,11 +119,13 @@ Variables principales:
 |---|---:|---|
 | `FRAME_WIDTH` / `FRAME_HEIGHT` | `640` / `360` | Resolución global de salida |
 | `JPEG_QUALITY` | `82` | Calidad de la captura enviada |
-| `ANALYSIS_COOLDOWN_SECONDS` | `15` | Separación mínima por cámara |
 | `MAX_API_CALLS_PER_MINUTE` | `60` | Presupuesto global; `0` lo desactiva |
 | `MAX_FRAME_PIXELS` | `2621440` | Techo de resolución para evitar OOM/costo |
 | `SAVE_CAPTURES` | `true` | Habilita el guardado de capturas en disco |
 | `SAVE_IMAGE_MIN_SEVERITY` | `high` | Severidad mínima para guardar el JPEG en disco |
+| `CHANGE_THRESHOLD_PERCENT` | `0` | % mínimo de variación para re-analizar; `0` analiza siempre (ver [Gating por variación](#gating-por-variación-opcional)) |
+| `PIXEL_CHANGE_THRESHOLD` | `24` | Delta mínimo (0-255) por píxel para contarlo como cambiado |
+| `DELTA_WIDTH` / `DELTA_HEIGHT` | `160` / `90` | Resolución interna del índice de variación (no es la imagen enviada a Alibaba) |
 | `CAPTURE_DIR` | `data/captures` | Directorio de capturas |
 | `CAPTURE_RETENTION_DAYS` | `7` | Elimina evidencia más antigua; `0` desactiva |
 | `CAPTURE_MAX_FILES_PER_CAMERA` | `1000` | Tope por cámara; `0` desactiva |
@@ -109,16 +140,26 @@ CAM1_NAME=Dormitorio
 CAM1_RTSP_URL=rtsp://usuario:clave@host:554/stream
 CAM1_PROMPT=Detecta caídas y riesgos alrededor de la cama.
 CAM1_POLL_INTERVAL_SECONDS=30
+CAM1_NOTIFICATION_THRESHOLD=high
 ```
+
+`CAMn_NOTIFICATION_THRESHOLD` (default `high`) es la severidad mínima para
+notificar esa cámara por un canal externo (Telegram u otro). **Hoy sólo se
+valida y persiste el umbral**: todavía no existe el envío real de
+notificaciones; es la base para conectar ese canal más adelante sin tener que
+rediseñar la configuración por cámara.
 
 Para agregar otra cámara, se crean `CAM2_*`, luego `CAM3_*`, y así sucesivamente.
 También se permiten canales con huecos (`CAM1`, `CAM3`, `CAM6`) y se conservan
 sus identificadores físicos. Cada cámara debe tener su propio `CAMn_PROMPT`.
 
-Las variables legacy de delta y resolución por cámara se ignoran con una
-advertencia. Elimínalas durante el upgrade. Tanto el default compatible
-`POLL_INTERVAL_SECONDS` como cada `CAMn_POLL_INTERVAL_SECONDS` fallan de forma
-explícita si son menores a 30.
+`ANALYSIS_COOLDOWN_SECONDS` y los overrides por cámara de resolución/variación
+(`CAMn_FRAME_WIDTH`, `CAMn_FRAME_HEIGHT`, `CAMn_CHANGE_THRESHOLD_PERCENT`) son
+legacy y se ignoran con una advertencia. Elimínalas durante el upgrade: la
+resolución y el umbral de variación son siempre globales
+(`FRAME_WIDTH`/`FRAME_HEIGHT`/`CHANGE_THRESHOLD_PERCENT`), nunca por cámara.
+Tanto el default compatible `POLL_INTERVAL_SECONDS` como cada
+`CAMn_POLL_INTERVAL_SECONDS` fallan de forma explícita si son menores a 10.
 
 Por compatibilidad de migración, IRIS también reconoce
 `VITE_RTSP_URL_CAMn`, pero emitirá una advertencia. No debe quedar como
@@ -177,7 +218,11 @@ editable con el esquema JSON. No existe system prompt global.
 
 Alibaba debe devolver `risk_score` como entero de `0` a `100`. Representa el
 riesgo visible e inmediato para la seguridad de la persona, no la certeza del
-modelo. `confidence` sigue siendo un número separado de `0` a `1`:
+modelo. `confidence` sigue siendo un número separado de `0` a `1`: es el
+propio juicio del modelo sobre qué tan bien pudo interpretar la escena (baja
+si la imagen está ocluida, mal iluminada, borrosa, o si sus propias
+`observations`/`summary` resultan vagas o inciertas; alta si pudo describir la
+escena con claridad y detalle), nunca el nivel de riesgo:
 
 | `risk_score` | Severidad normalizada |
 |---:|---|
@@ -193,6 +238,17 @@ IRIS calcula siempre `severity` con esta tabla y fija `alert=true` sólo desde
 backend los reemplaza. También rechaza scores booleanos, decimales, strings o
 fuera de rango.
 
+Además de `risk_score`, Alibaba debe devolver `criticidad` como uno de cuatro
+colores exactos: `verde`, `amarillo`, `naranja` o `rojo` (normalizado a
+minúsculas; cualquier otro valor, o su ausencia, hace fallar el análisis). A
+diferencia de `severity`/`alert`, `criticidad` **no** la calcula IRIS: es el
+juicio propio e independiente del modelo sobre qué tan crítica se ve la
+escena, e IRIS la muestra tal cual junto a la severidad calculada, sin usarla
+para severity, alert ni para el gating de `SAVE_IMAGE_MIN_SEVERITY`. El
+dashboard la presenta como una insignia separada ("Criticidad IA"); un color
+`negro`/"Sin datos" en la UI significa que esa cámara todavía no tiene ningún
+análisis, no un quinto nivel de riesgo devuelto por el modelo.
+
 Desde la UI, la Base URL se restringe a endpoints oficiales HTTPS bajo
 `.aliyuncs.com/compatible-mode/v1`; así una edición accidental no puede enviar
 la API key write-only a un host ajeno. El timeout editable está limitado a
@@ -201,8 +257,8 @@ la API key write-only a un host ajeno. El timeout editable está limitado a
 ### Configuración en SQLite (recomendado en producción)
 
 El dashboard guarda en SQLite las cámaras, prompts, polling por cámara y
-parámetros operacionales (resolución global, cooldown, límite de llamadas,
-severidad y proveedor Alibaba). Cada cambio incrementa una revisión dentro de
+parámetros operacionales (resolución global, límite de llamadas, severidad,
+umbral de variación y proveedor Alibaba). Cada cambio incrementa una revisión dentro de
 la misma transacción; un formulario desactualizado recibe `409` en vez de pisar
 otra edición.
 
@@ -260,6 +316,27 @@ Para convivir con la configuración existente de Sentinex también se aceptan
 `SENTINEX_MONGO_URI`, `SENTINEX_MONGO_DB` y
 `SENTINEX_MONGO_DETECTION_COLLECTION` como aliases.
 
+### Notificaciones por Telegram (opcional)
+
+```dotenv
+ENABLE_TELEGRAM=true
+TELEGRAM_BOT_TOKEN=123456:AAExampleTokenNoEsReal
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+Un único bot/chat global recibe la notificación (foto + texto) de cualquier
+análisis completado cuya severidad alcance o supere el
+`notification_threshold` **de esa cámara** (editable por cámara desde
+Administración; default `high`). Sin `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+definidas, el envío queda desactivado y el comportamiento es idéntico al
+actual. `ENABLE_TELEGRAM` (default `true`) es un interruptor maestro aparte:
+permite guardar las credenciales y dejar el envío apagado explícitamente sin
+borrarlas. Un fallo o timeout de Telegram se registra en el log y nunca
+interrumpe el análisis semántico ni los demás sinks — mismo principio que el
+sink de MongoDB. No existe (todavía) enrutamiento de chats distintos por
+cámara: todas las cámaras que superen su propio umbral notifican al mismo
+chat.
+
 ### Guardado de imágenes según severidad
 
 Todo análisis programado se registra siempre en el historial de eventos
@@ -302,10 +379,17 @@ disco, o `null` si la severidad quedó por debajo de
     "summary": "Persona visible en el suelo.",
     "observations": ["Postura horizontal junto a la cama."],
     "recommended_action": "Solicitar revisión inmediata.",
-    "requires_human_review": true
+    "requires_human_review": true,
+    "criticidad": "rojo"
   }
 }
 ```
+
+Con `CHANGE_THRESHOLD_PERCENT` activo, un ciclo con variación insuficiente no
+genera un `analysis.completed`: genera en cambio un evento liviano
+`analysis.skipped` (sin `analysis` ni `snapshot_path`, sólo
+`variation_index_percent` y `change_threshold_percent`), y el dashboard sigue
+mostrando la última lectura semántica real como vigente.
 
 Este servicio genera evidencia y eventos; el canal final de alerta (webhook,
 mensajería, central de cuidadores, etc.) queda desacoplado para integrarlo sin
@@ -381,8 +465,9 @@ Todos (salvo `/health` y `/auth/login`) requieren
 | `POST /auth/login` | ninguno | Recibe `{username, password}`, devuelve `access_token`, `token_type`, `username`, `role` |
 | `GET /auth/me` | cualquiera autenticado | Usuario y rol del token actual |
 | `GET /detections/latest?limit=` | cualquiera autenticado | Detecciones más recientes (máx. `200`) |
-| `GET /detections?date_from=&date_to=&camera_id=&severity=&page=&page_size=` | cualquiera autenticado | Historial paginado y filtrado (`page_size` máx. `200`) |
+| `GET /detections?date_from=&date_to=&camera_id=&severity=&criticidad=&sort_by=&sort_order=&page=&page_size=` | cualquiera autenticado | Historial paginado y filtrado (`page_size` máx. `200`). `sort_by` es `captured_at` (default), `camera_id` o `criticidad`; `sort_order` es `desc` (default) o `asc` |
 | `GET /detections/{id}/image` | cualquiera autenticado | JPEG de la detección, si existe y está dentro de `CAPTURE_DIR` |
+| `DELETE /detections/{id}` | `admin` | Elimina una detección del historial (Mongo); no borra el JPEG asociado en disco |
 | `GET /api/dashboard` | cualquiera autenticado | Una tarjeta por cámara: conectividad, captura operacional y estado `completed/failed/pending` del último intento semántico |
 | `GET /cameras/{camera_id}/latest-frame` | cualquiera autenticado | Último frame capturado para el siguiente análisis de visión de esa cámara |
 | `GET /cameras/{camera_id}/events/{event_id}/frame` | cualquiera autenticado | Preview inmutable asociado exactamente a ese análisis |
@@ -392,13 +477,13 @@ Todos (salvo `/health` y `/auth/login`) requieren
 | `GET /admin/settings` | `admin` | Revisión y configuración editable del motor de análisis |
 | `PATCH /admin/settings` | `admin` | Actualiza captura global, límites, severidad y proveedor Alibaba |
 | `GET /admin/cameras` | `admin` | Lista cámaras con URL RTSP completa, prompt e intervalo |
-| `POST /admin/cameras` | `admin` | Agrega `{name, rtsp_url, prompt, poll_interval_seconds}` |
+| `POST /admin/cameras` | `admin` | Agrega `{name, rtsp_url, prompt, poll_interval_seconds, notification_threshold?}` |
 | `PATCH /admin/cameras/{index}` | `admin` | Actualiza campos parciales de una cámara existente |
 | `DELETE /admin/cameras/{index}` | `admin` | Elimina una cámara (rechaza borrar la última restante) |
 
 `/admin/settings` expone únicamente parámetros operacionales: resolución
-global, cooldown, RPM, calidad JPEG, severidad mínima de evidencia y proveedor
-Alibaba. La API key es write-only:
+global, RPM, calidad JPEG, severidad mínima de evidencia, umbral de variación
+y proveedor Alibaba. La API key es write-only:
 la respuesta sólo incluye `alibaba_api_key_configured`. Un valor vacío conserva
 la clave actual. JWT, Mongo, CORS, host/puerto y rutas de infraestructura no se
 exponen en esta API.
@@ -415,7 +500,7 @@ agregarse, editarse y eliminarse vía la API del dashboard
 (`POST`/`PATCH`/`DELETE /admin/cameras`), además de editar el almacén SQLite.
 `/admin/cameras` reutiliza toda la validación de
 `iris.config.load_config()` (forma de la URL RTSP, prompt no vacío e intervalo
-de al menos 30 segundos). `GET /admin/cameras` devuelve la URL RTSP completa
+de al menos 10 segundos). `GET /admin/cameras` devuelve la URL RTSP completa
 exclusivamente al rol `admin`; en un `PATCH`, omitirla o enviar `""` conserva
 el valor existente.
 

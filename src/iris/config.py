@@ -23,11 +23,11 @@ _CAMERA_URL_PATTERNS = (
 _TRUE_VALUES = {"1", "true", "yes", "y", "on", "si", "sí"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 _OBSOLETE_GLOBAL_KEYS = {
-    "CHANGE_THRESHOLD_PERCENT",
-    "PIXEL_CHANGE_THRESHOLD",
-    "DELTA_WIDTH",
-    "DELTA_HEIGHT",
+    "ANALYSIS_COOLDOWN_SECONDS",
 }
+# Sólo el umbral es global (CHANGE_THRESHOLD_PERCENT); un override por cámara
+# de ese mismo umbral, o de la resolución del índice de variación, ya no se
+# admite y sigue tratándose como legacy.
 _OBSOLETE_CAMERA_OVERRIDE = re.compile(
     r"^CAM\d+_(?:FRAME_WIDTH|FRAME_HEIGHT|CHANGE_THRESHOLD_PERCENT)$"
 )
@@ -278,7 +278,7 @@ def load_config(
         source,
         "POLL_INTERVAL_SECONDS",
         30.0,
-        minimum=30.0,
+        minimum=10.0,
         maximum=86_400.0,
     )
     max_frame_pixels = _integer(
@@ -294,6 +294,14 @@ def load_config(
         prompt = source.get(f"{prefix}_PROMPT", "").strip()
         if not prompt:
             raise ConfigurationError(f"Falta la variable obligatoria {prefix}_PROMPT.")
+        notification_threshold = (
+            source.get(f"{prefix}_NOTIFICATION_THRESHOLD", "high").strip().lower()
+        )
+        if notification_threshold not in SEVERITY_ORDER:
+            raise ConfigurationError(
+                f"{prefix}_NOTIFICATION_THRESHOLD debe ser uno de: "
+                f"{', '.join(SEVERITY_ORDER)}; se recibió {notification_threshold!r}."
+            )
         cameras.append(
             CameraConfig(
                 index=index,
@@ -304,9 +312,10 @@ def load_config(
                     source,
                     f"{prefix}_POLL_INTERVAL_SECONDS",
                     default_poll_interval,
-                    minimum=30.0,
+                    minimum=10.0,
                     maximum=86_400.0,
                 ),
+                notification_threshold=notification_threshold,
             )
         )
 
@@ -349,6 +358,13 @@ def load_config(
             f"{', '.join(SEVERITY_ORDER)}; se recibió {save_image_min_severity!r}."
         )
 
+    change_threshold_percent = _number(
+        source, "CHANGE_THRESHOLD_PERCENT", 0.0, minimum=0.0, maximum=100.0
+    )
+    pixel_change_threshold = _integer(source, "PIXEL_CHANGE_THRESHOLD", 24, minimum=0, maximum=255)
+    delta_width = _integer(source, "DELTA_WIDTH", 160, minimum=8, maximum=1_024)
+    delta_height = _integer(source, "DELTA_HEIGHT", 90, minimum=8, maximum=1_024)
+
     mongo_uri = _mongo_uri(source)
     mongo_database = (
         source.get("MONGO_DATABASE", "").strip()
@@ -360,13 +376,15 @@ def load_config(
         or source.get("SENTINEX_MONGO_DETECTION_COLLECTION", "").strip()
         or "iris_detections"
     )
+    telegram_enabled = _boolean(source, "ENABLE_TELEGRAM", True)
+    telegram_bot_token = source.get("TELEGRAM_BOT_TOKEN", "").strip() or None
+    telegram_chat_id = source.get("TELEGRAM_CHAT_ID", "").strip() or None
 
     events_path_raw = source.get("EVENTS_JSONL_PATH", "data/events.jsonl").strip()
     return ServiceConfig(
         poll_interval_seconds=default_poll_interval,
         reconnect_interval_seconds=_number(source, "RTSP_RECONNECT_SECONDS", 5.0, minimum=0.1),
         frame_stale_after_seconds=_number(source, "FRAME_STALE_AFTER_SECONDS", 15.0, minimum=0.1),
-        analysis_cooldown_seconds=_number(source, "ANALYSIS_COOLDOWN_SECONDS", 15.0, minimum=0.0),
         max_api_calls_per_minute=_integer(
             source, "MAX_API_CALLS_PER_MINUTE", 60, minimum=0, maximum=100_000
         ),
@@ -422,9 +440,16 @@ def load_config(
             ),
         ),
         save_image_min_severity=save_image_min_severity,
+        change_threshold_percent=change_threshold_percent,
+        pixel_change_threshold=pixel_change_threshold,
+        delta_width=delta_width,
+        delta_height=delta_height,
         mongo_uri=mongo_uri,
         mongo_database=mongo_database,
         mongo_detection_collection=mongo_detection_collection,
+        telegram_enabled=telegram_enabled,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         auth_jwt_secret=_auth_jwt_secret(source),
         auth_jwt_expires_minutes=_integer(source, "AUTH_JWT_EXPIRES_MINUTES", 480, minimum=5),
         api_cors_origins=_cors_origins(source),
@@ -454,7 +479,6 @@ def config_mapping(
         "FRAME_HEIGHT": str(config.frame_height),
         "JPEG_QUALITY": str(config.jpeg_quality),
         "MAX_CONCURRENT_ANALYSES": str(config.max_concurrent_analyses),
-        "ANALYSIS_COOLDOWN_SECONDS": str(config.analysis_cooldown_seconds),
         "MAX_API_CALLS_PER_MINUTE": str(config.max_api_calls_per_minute),
         "MAX_FRAME_PIXELS": str(config.max_frame_pixels),
         "FRAME_STALE_AFTER_SECONDS": str(config.frame_stale_after_seconds),
@@ -464,6 +488,8 @@ def config_mapping(
         "DASHSCOPE_MAX_RETRIES": str(config.alibaba.max_retries),
         "DASHSCOPE_MAX_COMPLETION_TOKENS": str(config.alibaba.max_completion_tokens),
         "SAVE_IMAGE_MIN_SEVERITY": config.save_image_min_severity,
+        "CHANGE_THRESHOLD_PERCENT": str(config.change_threshold_percent),
+        "ENABLE_TELEGRAM": str(config.telegram_enabled).lower(),
     }
     for camera in config.cameras:
         prefix = camera.identifier
@@ -474,12 +500,16 @@ def config_mapping(
                 f"{prefix}_RTSP_URL": camera.rtsp_url,
                 f"{prefix}_PROMPT": camera.prompt,
                 f"{prefix}_POLL_INTERVAL_SECONDS": str(camera.poll_interval_seconds),
+                f"{prefix}_NOTIFICATION_THRESHOLD": camera.notification_threshold,
             }
         )
     if include_secrets_and_infrastructure:
         values.update(
             {
                 "DASHSCOPE_API_KEY": config.alibaba.api_key,
+                "PIXEL_CHANGE_THRESHOLD": str(config.pixel_change_threshold),
+                "DELTA_WIDTH": str(config.delta_width),
+                "DELTA_HEIGHT": str(config.delta_height),
                 "RTSP_TRANSPORT": config.rtsp_transport,
                 "RTSP_RECONNECT_SECONDS": str(config.reconnect_interval_seconds),
                 "RTSP_OPEN_TIMEOUT_MS": str(config.rtsp_open_timeout_ms),
@@ -504,6 +534,10 @@ def config_mapping(
         )
         if config.mongo_uri is not None:
             values["MONGO_URI"] = config.mongo_uri
+        if config.telegram_bot_token is not None:
+            values["TELEGRAM_BOT_TOKEN"] = config.telegram_bot_token
+        if config.telegram_chat_id is not None:
+            values["TELEGRAM_CHAT_ID"] = config.telegram_chat_id
         if config.auth_jwt_secret is not None:
             values["AUTH_JWT_SECRET"] = config.auth_jwt_secret
     return values
@@ -518,7 +552,6 @@ def sanitized_config(config: ServiceConfig) -> dict[str, object]:
         "reconnect_interval_seconds": config.reconnect_interval_seconds,
         "frame_stale_after_seconds": config.frame_stale_after_seconds,
         "frame_resolution": f"{config.frame_width}x{config.frame_height}",
-        "analysis_cooldown_seconds": config.analysis_cooldown_seconds,
         "max_api_calls_per_minute": config.max_api_calls_per_minute,
         "max_frame_pixels": config.max_frame_pixels,
         "jpeg_quality": config.jpeg_quality,
@@ -529,6 +562,9 @@ def sanitized_config(config: ServiceConfig) -> dict[str, object]:
         "capture_retention_days": config.capture_retention_days,
         "capture_max_files_per_camera": config.capture_max_files_per_camera,
         "save_image_min_severity": config.save_image_min_severity,
+        "change_threshold_percent": config.change_threshold_percent,
+        "pixel_change_threshold": config.pixel_change_threshold,
+        "delta_resolution": f"{config.delta_width}x{config.delta_height}",
         "events_jsonl_path": (str(config.events_jsonl_path) if config.events_jsonl_path else None),
         "events_max_bytes": config.events_max_bytes,
         "events_backup_count": config.events_backup_count,
@@ -537,6 +573,10 @@ def sanitized_config(config: ServiceConfig) -> dict[str, object]:
         "mongo_configured": config.mongo_uri is not None,
         "mongo_database": config.mongo_database,
         "mongo_detection_collection": config.mongo_detection_collection,
+        "telegram_enabled": config.telegram_enabled,
+        "telegram_configured": (
+            config.telegram_bot_token is not None and config.telegram_chat_id is not None
+        ),
         "auth_configured": config.auth_jwt_secret is not None,
         "auth_jwt_expires_minutes": config.auth_jwt_expires_minutes,
         "api_cors_origins": list(config.api_cors_origins),

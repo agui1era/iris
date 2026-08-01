@@ -31,6 +31,7 @@ _CAMERA_FIELD_SUFFIX = {
     "rtsp_url": "RTSP_URL",
     "prompt": "PROMPT",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
+    "notification_threshold": "NOTIFICATION_THRESHOLD",
 }
 
 
@@ -58,9 +59,11 @@ class SettingsResponse(BaseModel):
     frame_width: int
     frame_height: int
     jpeg_quality: int
-    analysis_cooldown_seconds: float
     max_api_calls_per_minute: int
     save_image_min_severity: str
+    change_threshold_percent: float
+    telegram_enabled: bool
+    telegram_configured: bool
     alibaba_api_key_configured: bool
     alibaba_base_url: str
     alibaba_model: str
@@ -76,9 +79,10 @@ class SettingsUpdateRequest(BaseModel):
     frame_width: int | None = Field(default=None, ge=32, le=8_192)
     frame_height: int | None = Field(default=None, ge=32, le=8_192)
     jpeg_quality: int | None = Field(default=None, ge=1, le=100)
-    analysis_cooldown_seconds: float | None = Field(default=None, ge=0)
     max_api_calls_per_minute: int | None = Field(default=None, ge=0, le=100_000)
     save_image_min_severity: str | None = None
+    change_threshold_percent: float | None = Field(default=None, ge=0, le=100)
+    telegram_enabled: bool | None = None
     alibaba_api_key: SecretStr | None = None
     alibaba_base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
     alibaba_model: str | None = Field(default=None, min_length=1, max_length=200)
@@ -122,6 +126,9 @@ class CameraResponse(BaseModel):
     rtsp_url: str
     prompt: str
     poll_interval_seconds: float
+    # Severidad mínima para notificar (Telegram u otro canal futuro); sólo el
+    # umbral se guarda hoy, el envío en sí todavía no está implementado.
+    notification_threshold: str
 
 
 class CreateCameraRequest(BaseModel):
@@ -130,7 +137,8 @@ class CreateCameraRequest(BaseModel):
     name: str
     rtsp_url: str
     prompt: str
-    poll_interval_seconds: float = Field(default=30.0, ge=30, le=86_400)
+    poll_interval_seconds: float = Field(default=30.0, ge=10, le=86_400)
+    notification_threshold: str = "high"
 
 
 class UpdateCameraRequest(BaseModel):
@@ -140,6 +148,7 @@ class UpdateCameraRequest(BaseModel):
     rtsp_url: str | None = None
     prompt: str | None = None
     poll_interval_seconds: float | None = Field(default=None, ge=30, le=86_400)
+    notification_threshold: str | None = None
 
 
 def _users_store_error_status(exc: UsersStoreError) -> int:
@@ -202,9 +211,10 @@ _SETTINGS_FIELD_KEY = {
     "frame_width": "FRAME_WIDTH",
     "frame_height": "FRAME_HEIGHT",
     "jpeg_quality": "JPEG_QUALITY",
-    "analysis_cooldown_seconds": "ANALYSIS_COOLDOWN_SECONDS",
     "max_api_calls_per_minute": "MAX_API_CALLS_PER_MINUTE",
     "save_image_min_severity": "SAVE_IMAGE_MIN_SEVERITY",
+    "change_threshold_percent": "CHANGE_THRESHOLD_PERCENT",
+    "telegram_enabled": "ENABLE_TELEGRAM",
     "alibaba_base_url": "DASHSCOPE_BASE_URL",
     "alibaba_model": "DASHSCOPE_MODEL",
     "alibaba_timeout_seconds": "DASHSCOPE_TIMEOUT_SECONDS",
@@ -219,9 +229,11 @@ def _settings_response(config: ServiceConfig, revision: int) -> SettingsResponse
         frame_width=config.frame_width,
         frame_height=config.frame_height,
         jpeg_quality=config.jpeg_quality,
-        analysis_cooldown_seconds=config.analysis_cooldown_seconds,
         max_api_calls_per_minute=config.max_api_calls_per_minute,
         save_image_min_severity=config.save_image_min_severity,
+        change_threshold_percent=config.change_threshold_percent,
+        telegram_enabled=config.telegram_enabled,
+        telegram_configured=bool(config.telegram_bot_token and config.telegram_chat_id),
         alibaba_api_key_configured=bool(config.alibaba.api_key.strip()),
         alibaba_base_url=config.alibaba.base_url,
         alibaba_model=config.alibaba.model,
@@ -329,6 +341,7 @@ def _camera_response(camera: CameraConfig) -> CameraResponse:
         rtsp_url=camera.rtsp_url,
         prompt=camera.prompt,
         poll_interval_seconds=camera.poll_interval_seconds,
+        notification_threshold=camera.notification_threshold,
     )
 
 
@@ -382,6 +395,7 @@ def post_camera(
         _camera_key(index, "rtsp_url"): body.rtsp_url,
         _camera_key(index, "prompt"): body.prompt,
         _camera_key(index, "poll_interval_seconds"): str(body.poll_interval_seconds),
+        _camera_key(index, "notification_threshold"): body.notification_threshold,
     }
 
     try:

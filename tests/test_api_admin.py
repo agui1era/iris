@@ -214,9 +214,11 @@ def test_get_settings_returns_editable_pipeline_shape(
     assert body["frame_width"] == 640
     assert body["frame_height"] == 360
     assert body["jpeg_quality"] == 82
-    assert body["analysis_cooldown_seconds"] == 15.0
     assert body["max_api_calls_per_minute"] == 60
     assert body["save_image_min_severity"] == "high"
+    assert body["change_threshold_percent"] == 0.0
+    assert body["telegram_enabled"] is True
+    assert body["telegram_configured"] is False
     assert body["alibaba_api_key_configured"] is True
     assert body["alibaba_base_url"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     assert body["alibaba_model"] == "qwen3.6-flash"
@@ -228,9 +230,11 @@ def test_get_settings_returns_editable_pipeline_shape(
         "frame_width",
         "frame_height",
         "jpeg_quality",
-        "analysis_cooldown_seconds",
         "max_api_calls_per_minute",
         "save_image_min_severity",
+        "change_threshold_percent",
+        "telegram_enabled",
+        "telegram_configured",
         "alibaba_api_key_configured",
         "alibaba_base_url",
         "alibaba_model",
@@ -261,6 +265,25 @@ def test_patch_settings_updates_severity_and_get_reflects_it(
 
     get_response = client.get("/admin/settings", headers=headers)
     assert get_response.json()["save_image_min_severity"] == "critical"
+
+
+def test_patch_settings_toggles_telegram_enabled(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+    revision = client.get("/admin/settings", headers=headers).json()["revision"]
+
+    patch_response = client.patch(
+        "/admin/settings",
+        json={"revision": revision, "telegram_enabled": False},
+        headers=headers,
+    )
+
+    assert patch_response.status_code == 200
+    assert patch_response.json()["telegram_enabled"] is False
+    stored = config_store.read_config_mapping(config_db_path)
+    assert stored["ENABLE_TELEGRAM"].strip().lower() == "false"
 
 
 def test_patch_settings_persists_pipeline_values_and_advances_revision(
@@ -545,6 +568,7 @@ def test_get_cameras_returns_full_rtsp_url_prompt_and_polling(
             "rtsp_url": "rtsp://camera-one/live",
             "prompt": "Vigila caídas visibles.",
             "poll_interval_seconds": 30.0,
+            "notification_threshold": "high",
         }
     ]
     assert "rtsp://camera-one/live" in response.text
@@ -575,6 +599,7 @@ def test_post_camera_creates_second_camera_with_next_index(
     assert body["rtsp_url"] == "rtsp://camera-two/live"
     assert body["prompt"] == "Vigila la sala de estar."
     assert body["poll_interval_seconds"] == 45.0
+    assert body["notification_threshold"] == "high"
     assert set(body) == {
         "index",
         "id",
@@ -582,6 +607,7 @@ def test_post_camera_creates_second_camera_with_next_index(
         "rtsp_url",
         "prompt",
         "poll_interval_seconds",
+        "notification_threshold",
     }
 
     get_response = client.get("/admin/cameras", headers=headers)
@@ -589,7 +615,7 @@ def test_post_camera_creates_second_camera_with_next_index(
     assert indices == [1, 2]
 
 
-def test_post_camera_rejects_polling_below_thirty_seconds(
+def test_post_camera_rejects_polling_below_ten_seconds(
     api_app_factory: Callable, tmp_path: Path
 ) -> None:
     client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
@@ -601,7 +627,7 @@ def test_post_camera_rejects_polling_below_thirty_seconds(
             "name": "Living",
             "rtsp_url": "rtsp://camera-two/live",
             "prompt": "Vigila la sala de estar.",
-            "poll_interval_seconds": 29.9,
+            "poll_interval_seconds": 9.9,
         },
         headers=headers,
     )
@@ -673,6 +699,59 @@ def test_patch_camera_updates_only_prompt(api_app_factory: Callable, tmp_path: P
     assert stored["CAM1_RTSP_URL"] == "rtsp://camera-one/live"
 
 
+def test_post_camera_accepts_custom_notification_threshold(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+
+    response = client.post(
+        "/admin/cameras",
+        json={
+            "name": "Living",
+            "rtsp_url": "rtsp://camera-two/live",
+            "prompt": "Vigila la sala de estar.",
+            "notification_threshold": "critical",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["notification_threshold"] == "critical"
+    stored = config_store.read_config_mapping(config_db_path)
+    assert stored["CAM2_NOTIFICATION_THRESHOLD"] == "critical"
+
+
+def test_patch_camera_updates_notification_threshold(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+
+    response = client.patch(
+        "/admin/cameras/1",
+        json={"notification_threshold": "medium"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["notification_threshold"] == "medium"
+    stored = config_store.read_config_mapping(config_db_path)
+    assert stored["CAM1_NOTIFICATION_THRESHOLD"] == "medium"
+
+
+def test_patch_camera_rejects_invalid_notification_threshold(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, _ = _seeded_admin_client(api_app_factory, tmp_path)
+
+    response = client.patch(
+        "/admin/cameras/1",
+        json={"notification_threshold": "urgentisimo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+
+
 def test_patch_camera_blank_rtsp_keeps_stored_secret(
     api_app_factory: Callable, tmp_path: Path
 ) -> None:
@@ -709,7 +788,7 @@ def test_patch_camera_updates_per_camera_poll_interval(
     assert stored["CAM1_POLL_INTERVAL_SECONDS"] == "45.0"
 
 
-def test_patch_camera_rejects_poll_interval_below_thirty_seconds(
+def test_patch_camera_rejects_poll_interval_below_ten_seconds(
     api_app_factory: Callable, tmp_path: Path
 ) -> None:
     client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
@@ -717,7 +796,7 @@ def test_patch_camera_rejects_poll_interval_below_thirty_seconds(
 
     response = client.patch(
         "/admin/cameras/1",
-        json={"poll_interval_seconds": 29.9},
+        json={"poll_interval_seconds": 9.9},
         headers=headers,
     )
 

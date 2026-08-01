@@ -1,22 +1,49 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
-import { ApiError, fetchDetections, SEVERITY_LEVELS, type Detection } from "../api/client";
+import {
+  ApiError,
+  CRITICALITY_COLORS,
+  deleteDetection,
+  fetchDetections,
+  SEVERITY_LEVELS,
+  type Detection,
+  type DetectionSortField,
+} from "../api/client";
 import { DetectionCard } from "../components/DetectionCard";
+import { useAuth } from "../auth/useAuth";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+const SORT_FIELD_LABELS: Record<DetectionSortField, string> = {
+  captured_at: "Fecha",
+  camera_id: "Cámara",
+  criticidad: "Criticidad",
+};
 
 interface Filters {
   dateFrom: string;
   dateTo: string;
   cameraId: string;
   severity: string;
+  criticidad: string;
 }
 
-const EMPTY_FILTERS: Filters = { dateFrom: "", dateTo: "", cameraId: "", severity: "" };
+const EMPTY_FILTERS: Filters = {
+  dateFrom: "",
+  dateTo: "",
+  cameraId: "",
+  severity: "",
+  criticidad: "",
+};
 
 export function HistoryPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [appliedFilters, setAppliedFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [sortBy, setSortBy] = useState<DetectionSortField>("captured_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
@@ -24,8 +51,9 @@ export function HistoryPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
     setLoading(true);
 
@@ -34,6 +62,9 @@ export function HistoryPage() {
       date_to: appliedFilters.dateTo || undefined,
       camera_id: appliedFilters.cameraId || undefined,
       severity: appliedFilters.severity || undefined,
+      criticidad: appliedFilters.criticidad || undefined,
+      sort_by: sortBy,
+      sort_order: sortOrder,
       page,
       page_size: pageSize,
     })
@@ -56,7 +87,9 @@ export function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, [appliedFilters, page, pageSize]);
+  }, [appliedFilters, sortBy, sortOrder, page, pageSize]);
+
+  useEffect(() => load(), [load]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -68,6 +101,26 @@ export function HistoryPage() {
     setFilters(EMPTY_FILTERS);
     setAppliedFilters(EMPTY_FILTERS);
     setPage(1);
+  };
+
+  const handleDelete = async (detection: Detection) => {
+    const label = detection.camera_name ?? detection.camera_id ?? detection.id;
+    if (
+      !window.confirm(
+        `¿Eliminar esta detección de "${label}"? Esta acción no se puede deshacer.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(detection.id);
+    try {
+      await deleteDetection(detection.id);
+      load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "No se pudo eliminar la detección.");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -118,6 +171,20 @@ export function HistoryPage() {
             ))}
           </select>
         </label>
+        <label className="field">
+          <span>Criticidad</span>
+          <select
+            value={filters.criticidad}
+            onChange={(event) => setFilters((f) => ({ ...f, criticidad: event.target.value }))}
+          >
+            <option value="">Todas</option>
+            {CRITICALITY_COLORS.map((color) => (
+              <option key={color} value={color}>
+                {color}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="filter-actions">
           <button type="submit" className="btn btn-primary">
             Filtrar
@@ -127,6 +194,38 @@ export function HistoryPage() {
           </button>
         </div>
       </form>
+
+      <div className="filters sort-controls">
+        <label className="field">
+          <span>Ordenar por</span>
+          <select
+            value={sortBy}
+            onChange={(event) => {
+              setSortBy(event.target.value as DetectionSortField);
+              setPage(1);
+            }}
+          >
+            {(Object.keys(SORT_FIELD_LABELS) as DetectionSortField[]).map((field) => (
+              <option key={field} value={field}>
+                {SORT_FIELD_LABELS[field]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Orden</span>
+          <select
+            value={sortOrder}
+            onChange={(event) => {
+              setSortOrder(event.target.value as "asc" | "desc");
+              setPage(1);
+            }}
+          >
+            <option value="desc">Descendente</option>
+            <option value="asc">Ascendente</option>
+          </select>
+        </label>
+      </div>
 
       {error && (
         <div className="alert alert-error" role="alert">
@@ -141,7 +240,12 @@ export function HistoryPage() {
       ) : (
         <div className="detection-grid">
           {items.map((detection) => (
-            <DetectionCard key={detection.id} detection={detection} />
+            <DetectionCard
+              key={detection.id}
+              detection={detection}
+              onDelete={isAdmin ? () => void handleDelete(detection) : undefined}
+              deleting={deletingId === detection.id}
+            />
           ))}
         </div>
       )}

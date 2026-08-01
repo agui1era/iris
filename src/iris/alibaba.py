@@ -23,13 +23,46 @@ _RISK_SEVERITY_THRESHOLDS = (
     (10, "info"),
     (0, "none"),
 )
-_OUTPUT_CONTRACT = """
+_CRITICALITY_COLORS = ("verde", "amarillo", "naranja", "rojo")
+
+
+def _severity_bands_text() -> str:
+    """Render `_RISK_SEVERITY_THRESHOLDS` as an ascending `min-max=severity` list.
+
+    Single source of truth shared with the model prompt: the bands the model
+    sees are always exactly the ones `_severity_from_risk_score` applies,
+    they can never drift apart.
+    """
+
+    ascending = list(reversed(_RISK_SEVERITY_THRESHOLDS))
+    bands = []
+    for index, (minimum, severity) in enumerate(ascending):
+        maximum = ascending[index + 1][0] - 1 if index + 1 < len(ascending) else 100
+        bands.append(f"{minimum}-{maximum}={severity}")
+    return ", ".join(bands)
+
+
+_SEVERITY_BANDS_TEXT = _severity_bands_text()
+_OUTPUT_CONTRACT = f"""
 Contrato técnico obligatorio de IRIS (no editable):
 Devuelve únicamente un objeto JSON con risk_score (entero 0..100), event
 (string snake_case), confidence (número 0..1), summary (string), observations
-(lista de strings), recommended_action (string) y requires_human_review
-(booleano). risk_score mide riesgo visible, no incertidumbre. No decidas
-severity ni alert: IRIS los calcula de forma determinista.
+(lista de strings), recommended_action (string), requires_human_review
+(booleano) y criticidad (string). risk_score mide riesgo visible, no
+incertidumbre. No decidas severity ni alert: IRIS los calcula de forma
+determinista a partir de risk_score con estas bandas exactas ({_SEVERITY_BANDS_TEXT}):
+úsalas sólo como referencia para calibrar tu risk_score de forma consistente,
+nunca las devuelvas como campos propios. criticidad es tu propio juicio
+independiente sobre qué tan crítica se ve la escena, expresado como uno de
+estos cuatro colores exactos: "verde" (sin riesgo aparente), "amarillo"
+(riesgo leve), "naranja" (riesgo moderado) o "rojo" (riesgo grave o
+potencialmente mortal). criticidad es informativa: se muestra junto a la
+severidad calculada por IRIS, pero nunca la reemplaza. summary debe ser una
+descripción completa de la escena (2-3 oraciones, no un titular breve) que
+mencione explícitamente tu propio risk_score al inicio, con el formato
+"Riesgo X/100: ..." seguido del detalle de lo observado. observations debe
+listar, en frases separadas, los detalles adicionales que respaldan esa
+descripción (postura, ubicación, objetos relevantes, personas involucradas).
 """.strip()
 
 
@@ -111,6 +144,12 @@ def _json_from_text(text: str) -> dict[str, Any]:
     parsed["observations"] = observations
     if not isinstance(parsed.get("requires_human_review"), bool):
         raise AlibabaAPIError("El análisis no contiene requires_human_review como booleano.")
+    criticidad = parsed.get("criticidad")
+    if not isinstance(criticidad, str) or criticidad.strip().lower() not in _CRITICALITY_COLORS:
+        raise AlibabaAPIError(
+            "El análisis no contiene criticidad válida (verde, amarillo, naranja o rojo)."
+        )
+    parsed["criticidad"] = criticidad.strip().lower()
     parsed["severity"] = _severity_from_risk_score(risk_score)
     parsed["alert"] = risk_score >= 70
     return parsed
@@ -166,12 +205,19 @@ class AlibabaVisionClient:
             f"- cámara: {camera.name}\n"
             f"- fecha_hora_utc: {captured_at}\n\n"
             "risk_score debe ser un entero entre 0 y 100 que represente el riesgo "
-            "visible. confidence debe permanecer entre 0 y 1 y expresa confianza, "
-            "no riesgo.\n"
+            "visible. confidence debe permanecer entre 0 y 1 y es tu propio juicio de "
+            "qué tan bien pudiste interpretar la escena, no el nivel de riesgo: baja "
+            "si la imagen está ocluida, mal iluminada, borrosa, o si tus propias "
+            "observations/summary son vagos o inciertos; alta si pudiste describir la "
+            "escena con claridad y detalle.\n"
             "Esquema obligatorio: risk_score (entero), event (string snake_case), "
             "confidence (número), summary (string), observations (lista de strings), "
-            "recommended_action (string) y requires_human_review (booleano). "
-            "severity y alert son calculados por IRIS y no deben decidirse aquí.\n\n"
+            "recommended_action (string), requires_human_review (booleano) y "
+            "criticidad (string: exactamente \"verde\", \"amarillo\", \"naranja\" o "
+            "\"rojo\", tu propio juicio de qué tan crítica se ve la escena). "
+            "severity y alert son calculados por IRIS a partir de risk_score y no "
+            "deben decidirse aquí; criticidad sí es tu propia lectura y se muestra "
+            "por separado.\n\n"
             "Devuelve únicamente un objeto JSON."
         )
         payload = {

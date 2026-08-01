@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
-from iris.image import encode_jpeg, resize_with_letterbox
+from iris.image import encode_jpeg, resize_with_letterbox, variation_index_percent
 from iris.models import (
     SEVERITY_ORDER,
     AnalysisResult,
@@ -19,6 +19,7 @@ from iris.models import (
     FrameSnapshot,
     ServiceConfig,
 )
+from iris.notifications import TelegramNotifier
 from iris.rtsp import LatestFrameReader
 from iris.sinks import CaptureStore, EventSink, MongoEventSink, MultiEventSink
 
@@ -47,8 +48,9 @@ class _CameraState:
     last_seen_sequence: int | None = None
     pending: _PendingCandidate | None = None
     in_flight: bool = False
-    last_analysis_started_at: float | None = None
     has_captured_frame: bool = False
+    last_analyzed_frame: Frame | None = None
+    last_severity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,17 @@ def _meets_severity_threshold(severity: object, threshold: str) -> bool:
     if not isinstance(severity, str) or severity not in SEVERITY_ORDER:
         return False
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
+
+
+def _notification_caption(job: _AnalysisJob, result: AnalysisResult) -> str:
+    risk_score = result.data.get("risk_score")
+    severity = result.data.get("severity")
+    summary = result.data.get("summary") or ""
+    return (
+        f"{job.camera.name} ({job.camera.identifier})\n"
+        f"Severidad: {severity} · Riesgo: {risk_score}/100\n"
+        f"{summary}"
+    )
 
 
 def _advance_schedule(current: float, now: float, interval: float) -> float:
@@ -116,9 +129,16 @@ class MonitoringService:
         readers: list[LatestFrameReader] | None = None,
         event_sink: EventSink | None = None,
         capture_store: CaptureStore | None = None,
+        notifier: TelegramNotifier | None = None,
     ) -> None:
         self._config = config
         self._analyzer = analyzer
+        if notifier is not None:
+            self._notifier = notifier
+        elif config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
+            self._notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+        else:
+            self._notifier = None
         if event_sink is not None:
             self._events = event_sink
         else:
@@ -206,7 +226,7 @@ class MonitoringService:
                         if waiting_for_first_frame and not state.has_captured_frame:
                             # El reader arranca en paralelo y puede tardar unos
                             # segundos en abrir RTSP. No castigamos ese warm-up
-                            # con una espera completa de 30s.
+                            # con una espera completa del intervalo configurado.
                             state.next_poll_at = now + min(
                                 _INITIAL_FRAME_RETRY_SECONDS,
                                 state.camera.poll_interval_seconds,
@@ -246,7 +266,7 @@ class MonitoringService:
             # que mantiene cada cámara después de ese primer turno.
             state.next_poll_at = now + (position * stagger_step)
         logger.info(
-            "IRIS iniciado con %d cámara(s), polling por cámara >=30s, resolución "
+            "IRIS iniciado con %d cámara(s), polling por cámara >=10s, resolución "
             "%dx%d, análisis Alibaba serializado y desfase inicial %.2fs.",
             len(self._states),
             self._config.frame_width,
@@ -275,6 +295,8 @@ class MonitoringService:
                 readers_stopped = False
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._analyzer.close()
+        if self._notifier is not None:
+            self._notifier.close()
         close_events = getattr(self._events, "close", None)
         if callable(close_events):
             close_events()
@@ -335,10 +357,84 @@ class MonitoringService:
                 state.pending = candidate
         self._try_schedule_pending(state)
 
+    def _last_severity_allows_skip(self, state: _CameraState) -> bool:
+        """True only once a camera has a *confirmed* low-risk reading.
+
+        An unknown/never-analyzed state (``None``) never allows a skip: we
+        only trust variation gating once we know for a fact the scene was
+        calm. A last severity of medium+ always forces re-analysis regardless
+        of pixel variation, so a stationary emergency (a person motionless
+        after a fall, an unattended fire that stopped spreading, an intruder
+        standing still) never stops getting re-checked just because the frame
+        looks visually similar to the previous one.
+        """
+
+        severity = state.last_severity
+        if not isinstance(severity, str) or severity not in SEVERITY_ORDER:
+            return False
+        return not _meets_severity_threshold(severity, "medium")
+
+    def _should_skip_low_variation(
+        self, state: _CameraState, candidate: _PendingCandidate
+    ) -> tuple[bool, float | None]:
+        if self._config.change_threshold_percent <= 0 or state.last_analyzed_frame is None:
+            return False, None
+        if not self._last_severity_allows_skip(state):
+            return False, None
+        variation = variation_index_percent(
+            state.last_analyzed_frame,
+            candidate.frame,
+            width=self._config.delta_width,
+            height=self._config.delta_height,
+            pixel_threshold=self._config.pixel_change_threshold,
+        )
+        return variation < self._config.change_threshold_percent, variation
+
+    def _handle_skipped_candidate(
+        self,
+        state: _CameraState,
+        candidate: _PendingCandidate,
+        variation: float | None,
+    ) -> None:
+        """Keep the operational preview fresh without spending an Alibaba call."""
+
+        try:
+            jpeg = encode_jpeg(candidate.frame, quality=self._config.jpeg_quality)
+            self._captures.save_latest(jpeg, camera_id=state.camera.identifier)
+        except Exception:
+            logger.exception(
+                "No se pudo guardar la captura operativa de %s tras omitir el análisis.",
+                state.camera.identifier,
+            )
+            return
+        state.has_captured_frame = True
+        logger.debug(
+            "Se omitió el análisis de %s: variación %.2f%% bajo el umbral %.2f%%.",
+            state.camera.identifier,
+            variation if variation is not None else 0.0,
+            self._config.change_threshold_percent,
+        )
+        self._publish_safely(
+            {
+                "event_type": "analysis.skipped",
+                "camera_id": state.camera.identifier,
+                "camera_name": state.camera.name,
+                "captured_at": candidate.snapshot.captured_at.isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
+                "trigger": "poll",
+                "variation_index_percent": variation,
+                "change_threshold_percent": self._config.change_threshold_percent,
+                "config_revision": self._config.config_revision,
+            }
+        )
+
     def _try_schedule_pending(self, state: _CameraState) -> bool:
         if self._stop_event.is_set():
             return False
         now = time.monotonic()
+        should_skip = False
+        skip_variation: float | None = None
+        candidate: _PendingCandidate | None = None
         with self._dispatch_lock:
             # Cero cola interna: mientras Alibaba trabaja, cada cámara conserva
             # su candidato más nuevo en _CameraState.pending.
@@ -357,25 +453,31 @@ class MonitoringService:
                         age,
                     )
                     return False
-                if (
-                    state.last_analysis_started_at is not None
-                    and now - state.last_analysis_started_at
-                    < self._config.analysis_cooldown_seconds
-                ):
-                    return False
-                if not self._rate_limiter.try_acquire(now):
-                    logger.debug(
-                        "Límite global de API alcanzado; %s queda pendiente.",
-                        state.camera.identifier,
-                    )
-                    return False
-                state.pending = None
-                state.in_flight = True
-            self._analysis_in_flight = True
-            position = next(
-                index for index, camera_state in enumerate(self._states) if camera_state is state
-            )
-            self._next_dispatch_position = (position + 1) % len(self._states)
+                should_skip, skip_variation = self._should_skip_low_variation(state, candidate)
+                if should_skip:
+                    state.pending = None
+                else:
+                    if not self._rate_limiter.try_acquire(now):
+                        logger.debug(
+                            "Límite global de API alcanzado; %s queda pendiente.",
+                            state.camera.identifier,
+                        )
+                        return False
+                    state.pending = None
+                    state.in_flight = True
+                    state.last_analyzed_frame = candidate.frame
+            if not should_skip:
+                self._analysis_in_flight = True
+                position = next(
+                    index
+                    for index, camera_state in enumerate(self._states)
+                    if camera_state is state
+                )
+                self._next_dispatch_position = (position + 1) % len(self._states)
+
+        if should_skip:
+            self._handle_skipped_candidate(state, candidate, skip_variation)
+            return False
 
         try:
             jpeg = encode_jpeg(candidate.frame, quality=self._config.jpeg_quality)
@@ -391,8 +493,6 @@ class MonitoringService:
                 trigger="poll",
                 latest_available=latest_result is not False,
             )
-            with state.lock:
-                state.last_analysis_started_at = now
             future = self._executor.submit(self._execute_analysis, job)
             state.has_captured_frame = True
         except Exception:
@@ -485,6 +585,13 @@ class MonitoringService:
             )
             preview_available = preview_path is not None or job.latest_available
             severity = result.data.get("severity")
+            if isinstance(severity, str) and severity in SEVERITY_ORDER:
+                with state.lock:
+                    state.last_severity = severity
+            if self._notifier is not None and _meets_severity_threshold(
+                severity, job.camera.notification_threshold
+            ):
+                self._notifier.send_photo(job.jpeg, caption=_notification_caption(job, result))
             if _meets_severity_threshold(severity, self._config.save_image_min_severity):
                 snapshot_path = self._captures.save(
                     job.jpeg,

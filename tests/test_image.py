@@ -8,6 +8,7 @@ from iris.image import (
     ImageProcessingError,
     encode_jpeg,
     resize_with_letterbox,
+    variation_index_percent,
 )
 
 
@@ -43,3 +44,56 @@ def test_encode_jpeg_returns_decodable_image_and_validates_quality() -> None:
     assert decoded.shape == frame.shape
     with pytest.raises(ImageProcessingError, match="calidad JPEG"):
         encode_jpeg(frame, quality=0)
+
+
+def test_variation_index_percent_is_zero_for_identical_frames() -> None:
+    frame = np.full((20, 20, 3), (50, 60, 70), dtype=np.uint8)
+
+    variation = variation_index_percent(
+        frame, frame, width=10, height=10, pixel_threshold=24
+    )
+
+    assert variation == 0.0
+
+
+def test_variation_index_percent_is_high_for_completely_different_frames() -> None:
+    previous = np.zeros((20, 20, 3), dtype=np.uint8)
+    current = np.full((20, 20, 3), 255, dtype=np.uint8)
+
+    variation = variation_index_percent(
+        previous, current, width=10, height=10, pixel_threshold=24
+    )
+
+    assert variation == 100.0
+
+
+def test_variation_index_percent_ignores_changes_below_pixel_threshold() -> None:
+    previous = np.full((10, 10, 3), 100, dtype=np.uint8)
+    current = np.full((10, 10, 3), 105, dtype=np.uint8)
+
+    variation = variation_index_percent(
+        previous, current, width=10, height=10, pixel_threshold=24
+    )
+
+    assert variation == 0.0
+
+
+def test_variation_index_percent_counts_only_pixels_past_threshold() -> None:
+    previous = np.zeros((10, 10, 3), dtype=np.uint8)
+    current = np.zeros((10, 10, 3), dtype=np.uint8)
+    current[:5, :] = 255  # top half changes drastically, bottom half stays identical
+
+    variation = variation_index_percent(
+        previous, current, width=10, height=10, pixel_threshold=24
+    )
+
+    assert variation == pytest.approx(50.0, abs=1.0)
+
+
+def test_variation_index_percent_rejects_invalid_dimensions_and_threshold() -> None:
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    with pytest.raises(ImageProcessingError, match="tamaño de comparación"):
+        variation_index_percent(frame, frame, width=0, height=10, pixel_threshold=24)
+    with pytest.raises(ImageProcessingError, match="pixel_threshold"):
+        variation_index_percent(frame, frame, width=10, height=10, pixel_threshold=-1)

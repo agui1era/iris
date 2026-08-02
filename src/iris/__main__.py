@@ -66,6 +66,9 @@ def _configure_logging(level_name: str) -> None:
         level=level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # httpx includes the complete request URL in INFO logs. Telegram embeds
+    # the bot token in that URL, so those transport logs must never be emitted.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _install_signal_handlers(service: MonitoringSupervisor) -> None:

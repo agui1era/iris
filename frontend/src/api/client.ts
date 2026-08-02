@@ -121,8 +121,15 @@ export interface SettingsResponse {
   change_threshold_percent: number;
   /** Master switch, independent from whether the bot/chat are configured. */
   telegram_enabled: boolean;
-  /** Read-only: whether TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set (env-only, not editable here). */
+  /** Read-only: whether both Telegram credentials are configured. */
   telegram_configured: boolean;
+  telegram_bot_token_configured: boolean;
+  telegram_chat_id: string | null;
+  telegram_dedup_cooldown_seconds: number;
+  history_chat_enabled: boolean;
+  openai_api_key_configured: boolean;
+  history_chat_model: string;
+  history_chat_max_range_days: number;
   alibaba_api_key_configured: boolean;
   alibaba_base_url: string;
   alibaba_model: string;
@@ -133,11 +140,82 @@ export interface SettingsResponse {
 
 /** Mirrors `SettingsUpdateRequest`. */
 export type UpdateSettingsPayload = Partial<
-  Omit<SettingsResponse, "alibaba_api_key_configured" | "telegram_configured">
+  Omit<
+    SettingsResponse,
+    | "alibaba_api_key_configured"
+    | "telegram_configured"
+    | "telegram_bot_token_configured"
+    | "openai_api_key_configured"
+  >
 > & {
   /** Write-only. Omit or send an empty value to preserve the configured key. */
   alibaba_api_key?: string;
+  /** Write-only. Omit or send an empty value to preserve the configured token. */
+  telegram_bot_token?: string;
+  /** Write-only. Omit or send an empty value to preserve the configured key. */
+  openai_api_key?: string;
 };
+
+export interface ChatConfigResponse {
+  enabled: boolean;
+  configured: boolean;
+  model: string;
+  max_range_days: number;
+  cameras: Array<{ id: string; name: string }>;
+}
+
+export interface ChatThread {
+  id: string;
+  username: string;
+  camera_id: string;
+  camera_name: string;
+  date_from: string;
+  date_to: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  thread_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface ChatThreadDetail {
+  thread: ChatThread;
+  messages: ChatMessage[];
+}
+
+export interface ChatQueryPayload {
+  camera_id: string;
+  date_from: string;
+  date_to: string;
+  question: string;
+  language: "es" | "en";
+  thread_id?: string;
+}
+
+export interface ChatQueryResponse {
+  thread_id: string;
+  answer: string;
+  source_count: number;
+  group_count: number;
+}
+
+export interface TelegramTestResponse {
+  sent: boolean;
+  with_image: boolean;
+  attempts: number;
+  detail: string;
+}
+
+export interface MonitorRestartResponse {
+  requested: boolean;
+  revision: number;
+  detail: string;
+}
 
 /**
  * Mirrors `CameraResponse` / `_camera_response()` in `routes_admin.py`.
@@ -150,8 +228,9 @@ export interface AdminCameraRecord {
   rtsp_url: string;
   prompt: string;
   poll_interval_seconds: number;
-  /** Minimum severity to notify (Telegram, etc). Only the threshold is stored today; sending isn't wired up yet. */
+  /** Minimum severity/risk band required to notify this camera. */
   notification_threshold: string;
+  notifications_enabled: boolean;
 }
 
 /** Per-camera configuration includes its own polling interval. */
@@ -161,6 +240,7 @@ export interface CreateCameraPayload {
   prompt: string;
   poll_interval_seconds: number;
   notification_threshold?: string;
+  notifications_enabled?: boolean;
 }
 
 /** Mirrors `UpdateCameraRequest`. Only send the fields being changed; omitted fields are left untouched. */
@@ -170,6 +250,7 @@ export interface UpdateCameraPayload {
   prompt?: string;
   poll_interval_seconds?: number;
   notification_threshold?: string;
+  notifications_enabled?: boolean;
 }
 
 /** Non-secret runtime settings returned with the monitoring dashboard. */
@@ -435,6 +516,30 @@ export function fetchSettings(): Promise<SettingsResponse> {
 
 export function updateSettings(payload: UpdateSettingsPayload): Promise<SettingsResponse> {
   return request<SettingsResponse>("/admin/settings", { method: "PATCH", body: payload });
+}
+
+export function testTelegramNotification(): Promise<TelegramTestResponse> {
+  return request<TelegramTestResponse>("/admin/notifications/telegram/test", { method: "POST" });
+}
+
+export function restartMonitorConnections(): Promise<MonitorRestartResponse> {
+  return request<MonitorRestartResponse>("/admin/monitor/restart", { method: "POST" });
+}
+
+export function fetchChatConfig(): Promise<ChatConfigResponse> {
+  return request<ChatConfigResponse>("/chat/config");
+}
+
+export function fetchChatThreads(): Promise<ChatThread[]> {
+  return request<ChatThread[]>("/chat/threads");
+}
+
+export function fetchChatThread(threadId: string): Promise<ChatThreadDetail> {
+  return request<ChatThreadDetail>(`/chat/threads/${encodeURIComponent(threadId)}`);
+}
+
+export function queryHistoryChat(payload: ChatQueryPayload): Promise<ChatQueryResponse> {
+  return request<ChatQueryResponse>("/chat/query", { method: "POST", body: payload });
 }
 
 export function fetchAdminCameras(): Promise<AdminCameraRecord[]> {

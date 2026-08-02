@@ -170,6 +170,36 @@ def read_config_snapshot(path: Path) -> tuple[dict[str, str], int]:
     return dict(rows), int(row[0]) if row else 0
 
 
+def bump_config_revision(path: Path) -> int:
+    """Request a monitor reload without changing any configuration value."""
+
+    connection = _connect(path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT desired_revision FROM config_state WHERE singleton = 1"
+        ).fetchone()
+        current_revision = int(row[0]) if row else 0
+        new_revision = current_revision + 1
+        connection.execute(
+            """
+            UPDATE config_state
+            SET initialized = 1,
+                desired_revision = ?,
+                updated_at = ?
+            WHERE singleton = 1
+            """,
+            (new_revision, datetime.now(UTC).isoformat()),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        _close_connection(connection, path)
+    return new_revision
+
+
 def mutate_config_mapping(
     path: Path,
     *,

@@ -3,6 +3,7 @@ import { CriticalityBadge } from "./CriticalityBadge";
 import { DetectionThumbnail } from "./DetectionThumbnail";
 import { SeverityBadge } from "./SeverityBadge";
 import { useLanguage } from "../i18n/useLanguage";
+import { analysisEventLabel, analysisMessageLabel } from "../i18n/analysisLabels";
 
 function formatTimestamp(value: string | null, locale: string): string {
   if (!value) return "—";
@@ -19,14 +20,17 @@ interface DetectionCardProps {
 }
 
 export function DetectionCard({ detection, onDelete, deleting = false }: DetectionCardProps) {
-  const { locale, t } = useLanguage();
+  const { language, locale, t } = useLanguage();
   const cameraLabel = detection.camera_name ?? detection.camera_id ?? t("Cámara desconocida", "Unknown camera");
 
   return (
     <article className="detection-card">
       <div className="detection-media">
         {detection.has_image ? (
-          <DetectionThumbnail id={detection.id} alt={detection.event ?? cameraLabel} />
+          <DetectionThumbnail
+            id={detection.id}
+            alt={detection.event ? analysisEventLabel(detection.event, language) : cameraLabel}
+          />
         ) : (
           <div className="thumb thumb-empty">{t("Sin imagen", "No image")}</div>
         )}
@@ -49,11 +53,18 @@ export function DetectionCard({ detection, onDelete, deleting = false }: Detecti
           </div>
         )}
         {detection.alert && <div className="detection-alert">{t("Alerta", "Alert")}</div>}
-        {detection.event && <div className="detection-event">{detection.event}</div>}
-        {detection.summary && <p className="detection-summary">{detection.summary}</p>}
+        {detection.event && (
+          <div className="detection-event">{analysisEventLabel(detection.event, language)}</div>
+        )}
+        {detection.summary && (
+          <p className="detection-summary">
+            {analysisMessageLabel(detection.summary, language)}
+          </p>
+        )}
         {detection.recommended_action && (
           <p className="detection-action">
-            <strong>{t("Acción recomendada:", "Recommended action:")}</strong> {detection.recommended_action}
+            <strong>{t("Acción recomendada:", "Recommended action:")}</strong>{" "}
+            {analysisMessageLabel(detection.recommended_action, language)}
           </p>
         )}
         {onDelete && (

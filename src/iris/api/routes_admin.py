@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import asdict
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -10,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from iris import config_store
 from iris.config import ConfigurationError, config_mapping, load_config
 from iris.models import CameraConfig, ServiceConfig
+from iris.notifications import TelegramNotifier
 from iris.users_store import (
     UsersStoreError,
     create_user,
@@ -32,6 +35,7 @@ _CAMERA_FIELD_SUFFIX = {
     "prompt": "PROMPT",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "notification_threshold": "NOTIFICATION_THRESHOLD",
+    "notifications_enabled": "NOTIFICATIONS_ENABLED",
 }
 
 
@@ -64,6 +68,13 @@ class SettingsResponse(BaseModel):
     change_threshold_percent: float
     telegram_enabled: bool
     telegram_configured: bool
+    telegram_bot_token_configured: bool
+    telegram_chat_id: str | None
+    telegram_dedup_cooldown_seconds: int
+    history_chat_enabled: bool
+    openai_api_key_configured: bool
+    history_chat_model: str
+    history_chat_max_range_days: int
     alibaba_api_key_configured: bool
     alibaba_base_url: str
     alibaba_model: str
@@ -83,6 +94,15 @@ class SettingsUpdateRequest(BaseModel):
     save_image_min_severity: str | None = None
     change_threshold_percent: float | None = Field(default=None, ge=0, le=100)
     telegram_enabled: bool | None = None
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = Field(default=None, max_length=200)
+    telegram_dedup_cooldown_seconds: int | None = Field(
+        default=None, ge=0, le=604_800
+    )
+    history_chat_enabled: bool | None = None
+    openai_api_key: SecretStr | None = None
+    history_chat_model: str | None = Field(default=None, min_length=1, max_length=100)
+    history_chat_max_range_days: int | None = Field(default=None, ge=1, le=366)
     alibaba_api_key: SecretStr | None = None
     alibaba_base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
     alibaba_model: str | None = Field(default=None, min_length=1, max_length=200)
@@ -119,6 +139,19 @@ class SettingsUpdateRequest(BaseModel):
         return value.strip().rstrip("/")
 
 
+class TelegramTestResponse(BaseModel):
+    sent: bool
+    with_image: bool
+    attempts: int
+    detail: str
+
+
+class MonitorRestartResponse(BaseModel):
+    requested: bool
+    revision: int
+    detail: str
+
+
 class CameraResponse(BaseModel):
     index: int
     id: str
@@ -126,9 +159,9 @@ class CameraResponse(BaseModel):
     rtsp_url: str
     prompt: str
     poll_interval_seconds: float
-    # Severidad mínima para notificar (Telegram u otro canal futuro); sólo el
-    # umbral se guarda hoy, el envío en sí todavía no está implementado.
+    # Severidad mínima para notificar esta cámara.
     notification_threshold: str
+    notifications_enabled: bool
 
 
 class CreateCameraRequest(BaseModel):
@@ -139,6 +172,7 @@ class CreateCameraRequest(BaseModel):
     prompt: str
     poll_interval_seconds: float = Field(default=30.0, ge=10, le=86_400)
     notification_threshold: str = "high"
+    notifications_enabled: bool = True
 
 
 class UpdateCameraRequest(BaseModel):
@@ -149,6 +183,7 @@ class UpdateCameraRequest(BaseModel):
     prompt: str | None = None
     poll_interval_seconds: float | None = Field(default=None, ge=30, le=86_400)
     notification_threshold: str | None = None
+    notifications_enabled: bool | None = None
 
 
 def _users_store_error_status(exc: UsersStoreError) -> int:
@@ -215,6 +250,11 @@ _SETTINGS_FIELD_KEY = {
     "save_image_min_severity": "SAVE_IMAGE_MIN_SEVERITY",
     "change_threshold_percent": "CHANGE_THRESHOLD_PERCENT",
     "telegram_enabled": "ENABLE_TELEGRAM",
+    "telegram_chat_id": "TELEGRAM_CHAT_ID",
+    "telegram_dedup_cooldown_seconds": "TELEGRAM_DEDUP_COOLDOWN_SECONDS",
+    "history_chat_enabled": "HISTORY_CHAT_ENABLED",
+    "history_chat_model": "HISTORY_CHAT_MODEL",
+    "history_chat_max_range_days": "HISTORY_CHAT_MAX_RANGE_DAYS",
     "alibaba_base_url": "DASHSCOPE_BASE_URL",
     "alibaba_model": "DASHSCOPE_MODEL",
     "alibaba_timeout_seconds": "DASHSCOPE_TIMEOUT_SECONDS",
@@ -234,6 +274,13 @@ def _settings_response(config: ServiceConfig, revision: int) -> SettingsResponse
         change_threshold_percent=config.change_threshold_percent,
         telegram_enabled=config.telegram_enabled,
         telegram_configured=bool(config.telegram_bot_token and config.telegram_chat_id),
+        telegram_bot_token_configured=bool(config.telegram_bot_token),
+        telegram_chat_id=config.telegram_chat_id,
+        telegram_dedup_cooldown_seconds=config.telegram_dedup_cooldown_seconds,
+        history_chat_enabled=config.history_chat_enabled,
+        openai_api_key_configured=bool(config.openai_api_key),
+        history_chat_model=config.history_chat_model,
+        history_chat_max_range_days=config.history_chat_max_range_days,
         alibaba_api_key_configured=bool(config.alibaba.api_key.strip()),
         alibaba_base_url=config.alibaba.base_url,
         alibaba_model=config.alibaba.model,
@@ -262,13 +309,25 @@ def patch_settings(
     raw = body.model_dump(exclude_unset=True, exclude_none=True)
     expected_revision = raw.pop("revision")
     secret = raw.pop("alibaba_api_key", None)
-    secret_was_supplied = secret is not None
+    telegram_secret = raw.pop("telegram_bot_token", None)
+    openai_secret = raw.pop("openai_api_key", None)
+    secret_was_supplied = (
+        secret is not None or telegram_secret is not None or openai_secret is not None
+    )
     updates = raw
     new_values = {_SETTINGS_FIELD_KEY[field]: str(value) for field, value in updates.items()}
     if secret is not None:
         api_key = secret.get_secret_value().strip()
         if api_key:
             new_values["DASHSCOPE_API_KEY"] = api_key
+    if telegram_secret is not None:
+        bot_token = telegram_secret.get_secret_value().strip()
+        if bot_token:
+            new_values["TELEGRAM_BOT_TOKEN"] = bot_token
+    if openai_secret is not None:
+        openai_api_key = openai_secret.get_secret_value().strip()
+        if openai_api_key:
+            new_values["OPENAI_API_KEY"] = openai_api_key
 
     if not new_values and not secret_was_supplied:
         raise HTTPException(
@@ -298,6 +357,88 @@ def patch_settings(
 
     config = _fresh_config(request)
     return _settings_response(config, config.config_revision)
+
+
+def _latest_available_capture(config: ServiceConfig) -> Path | None:
+    capture_root = config.capture_dir.resolve()
+    candidates: list[Path] = []
+    for camera in config.cameras:
+        candidate = (capture_root / camera.identifier / "latest.jpg").resolve()
+        if candidate.is_relative_to(capture_root) and candidate.is_file():
+            candidates.append(candidate)
+    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
+
+@router.post("/notifications/telegram/test", response_model=TelegramTestResponse)
+def test_telegram_notification(request: Request, admin: AdminUser) -> TelegramTestResponse:
+    """Send a real test using the newest capture, with a text-only fallback."""
+
+    config = _fresh_config(request)
+    if not config.telegram_bot_token or not config.telegram_chat_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Guarda primero el token del bot y el ID del chat o canal.",
+        )
+
+    capture = _latest_available_capture(config)
+    notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+    caption = (
+        "🧪 IRIS · Notificación de prueba\n"
+        "El canal de Telegram está configurado correctamente."
+    )
+    fallback_message = (
+        f"{caption}\n\n"
+        "No había una captura disponible; se usó el mensaje de respaldo."
+    )
+    sent = False
+    attempts = 0
+    try:
+        for attempts in range(1, 4):
+            if capture is not None:
+                try:
+                    sent = notifier.send_photo(capture.read_bytes(), caption=caption)
+                except OSError:
+                    capture = None
+                    sent = notifier.send_message(fallback_message)
+            else:
+                sent = notifier.send_message(fallback_message)
+            if sent:
+                break
+            if attempts < 3:
+                time.sleep(0.5)
+    finally:
+        notifier.close()
+
+    if not sent:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Telegram no confirmó el envío después de 3 intentos. "
+                "Revisa el token, el chat y los permisos del bot."
+            ),
+        )
+    return TelegramTestResponse(
+        sent=True,
+        with_image=capture is not None,
+        attempts=attempts,
+        detail=(
+            "Prueba enviada con la captura más reciente."
+            if capture is not None
+            else "Prueba enviada como mensaje de respaldo porque no había una captura disponible."
+        ),
+    )
+
+
+@router.post("/monitor/restart", response_model=MonitorRestartResponse)
+def restart_monitor_connections(request: Request, admin: AdminUser) -> MonitorRestartResponse:
+    """Ask iris-monitor to rebuild its generation and reconnect every RTSP source."""
+
+    revision = config_store.bump_config_revision(request.app.state.users_db_path)
+    return MonitorRestartResponse(
+        requested=True,
+        revision=revision,
+        detail="Reinicio solicitado. Las cámaras volverán a conectarse automáticamente.",
+    )
 
 
 def _camera_key(index: int, field: str) -> str:
@@ -342,6 +483,7 @@ def _camera_response(camera: CameraConfig) -> CameraResponse:
         prompt=camera.prompt,
         poll_interval_seconds=camera.poll_interval_seconds,
         notification_threshold=camera.notification_threshold,
+        notifications_enabled=camera.notifications_enabled,
     )
 
 
@@ -396,6 +538,7 @@ def post_camera(
         _camera_key(index, "prompt"): body.prompt,
         _camera_key(index, "poll_interval_seconds"): str(body.poll_interval_seconds),
         _camera_key(index, "notification_threshold"): body.notification_threshold,
+        _camera_key(index, "notifications_enabled"): str(body.notifications_enabled).lower(),
     }
 
     try:

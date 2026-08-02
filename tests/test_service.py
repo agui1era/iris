@@ -307,6 +307,25 @@ def test_close_releases_resources_even_when_service_was_never_started(
     assert executor.shutdown_calls == [{"wait": True, "cancel_futures": True}]
 
 
+def test_close_allows_recovery_when_old_rtsp_reader_is_slow_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service, analyzer, _, _, executor = build_service(
+        monkeypatch,
+        frames=[],
+        outcomes=[],
+    )
+    reader = service._states[0].reader
+    reader.stop = lambda: False
+
+    service.close()
+
+    assert analyzer.closed is True
+    assert executor.shutdown_calls == [{"wait": True, "cancel_futures": True}]
+    assert "la reconexión continuará" in caplog.text
+
+
 def test_alibaba_executor_is_globally_serial_even_with_legacy_higher_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1041,6 +1060,52 @@ def test_notifies_telegram_when_severity_meets_camera_threshold(
     assert len(notifier.calls) == 1
     assert "posible caída" in notifier.calls[0]["caption"]
     assert camera.name in notifier.calls[0]["caption"]
+    assert "Severidad: Alta" in notifier.calls[0]["caption"]
+
+
+def test_telegram_caption_translates_none_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(make_config().cameras[0], notification_threshold="none")
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        replace(make_config(), cameras=(camera,)),
+        FakeAnalyzer([make_result("sin novedades", severity="none")]),
+        readers=[SequenceReader(make_snapshots([np.zeros((8, 8, 3), dtype=np.uint8)]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    service.poll_once()
+
+    assert "Severidad: Sin riesgo" in notifier.calls[0]["caption"]
+    assert "none" not in notifier.calls[0]["caption"]
+
+
+def test_telegram_threshold_uses_numeric_risk_score_returned_by_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(make_config().cameras[0], notification_threshold="high")
+    result = make_result("riesgo visible", severity="low")
+    # The delivery gate must use risk_score directly. Severity is retained in
+    # the fixture as a deliberately contradictory value to catch regressions.
+    result.data["risk_score"] = 70
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        replace(make_config(), cameras=(camera,)),
+        FakeAnalyzer([result]),
+        readers=[SequenceReader(make_snapshots([np.zeros((8, 8, 3), dtype=np.uint8)]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    service.poll_once()
+
+    assert len(notifier.calls) == 1
 
 
 def test_does_not_notify_below_camera_notification_threshold(
@@ -1064,6 +1129,72 @@ def test_does_not_notify_below_camera_notification_threshold(
     service.poll_once()
 
     assert notifier.calls == []
+
+
+def test_camera_notification_switch_disables_telegram_for_that_camera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(
+        make_config().cameras[0],
+        notification_threshold="none",
+        notifications_enabled=False,
+    )
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    notifier = FakeNotifier()
+    service = MonitoringService(
+        replace(make_config(), cameras=(camera,)),
+        FakeAnalyzer([make_result("posible caída", severity="critical")]),
+        readers=[SequenceReader(make_snapshots([frame]))],
+        event_sink=MemoryEventSink(),
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    service.poll_once()
+
+    assert notifier.calls == []
+
+
+def test_telegram_groups_same_event_but_sends_escalation_and_new_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_executor_patch(monkeypatch)
+    camera = replace(make_config().cameras[0], notification_threshold="none")
+    config = replace(
+        make_config(),
+        cameras=(camera,),
+        telegram_dedup_cooldown_seconds=600,
+    )
+    outcomes = [
+        make_result("Persona caminando", severity="low"),
+        make_result("Persona todavía caminando", severity="low"),
+        make_result("La situación empeoró", severity="high"),
+        make_result("Se detectó humo", severity="high"),
+    ]
+    for result in outcomes[:3]:
+        result.data["event"] = "persona_caminando"
+    outcomes[3].data["event"] = "humo"
+    frames = [np.full((8, 8, 3), value, dtype=np.uint8) for value in (0, 20, 40, 60)]
+    notifier = FakeNotifier()
+    events = MemoryEventSink()
+    service = MonitoringService(
+        config,
+        FakeAnalyzer(outcomes),
+        readers=[SequenceReader(make_snapshots(frames))],
+        event_sink=events,
+        capture_store=MemoryCaptureStore(),
+        notifier=notifier,
+    )
+
+    for _ in frames:
+        service.poll_once()
+
+    assert len(notifier.calls) == 3
+    assert "Persona caminando" in notifier.calls[0]["caption"]
+    assert "La situación empeoró" in notifier.calls[1]["caption"]
+    assert "Se detectó humo" in notifier.calls[2]["caption"]
+    assert len(events.events) == 4
 
 
 def test_no_notifier_configured_never_calls_telegram(monkeypatch: pytest.MonkeyPatch) -> None:

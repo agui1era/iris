@@ -14,7 +14,13 @@ class FakeHTTPClient:
         self.calls: list[dict[str, Any]] = []
         self.closed = False
 
-    def post(self, url: str, *, data: dict[str, Any], files: dict[str, Any]) -> httpx.Response:
+    def post(
+        self,
+        url: str,
+        *,
+        data: dict[str, Any],
+        files: dict[str, Any] | None = None,
+    ) -> httpx.Response:
         self.calls.append({"url": url, "data": data, "files": files})
         if isinstance(self.outcome, Exception):
             raise self.outcome
@@ -47,6 +53,22 @@ def test_send_photo_truncates_captions_over_telegrams_limit() -> None:
     notifier.send_photo(b"jpeg", caption=long_caption)
 
     assert len(fake_http.calls[0]["data"]["caption"]) == 1024
+
+
+def test_send_message_posts_text_without_a_photo() -> None:
+    fake_http = FakeHTTPClient(httpx.Response(200, json={"ok": True}))
+    notifier = TelegramNotifier("secret-token", "12345", client=fake_http)
+
+    result = notifier.send_message("IRIS test")
+
+    assert result is True
+    assert fake_http.calls == [
+        {
+            "url": "https://api.telegram.org/botsecret-token/sendMessage",
+            "data": {"chat_id": "12345", "text": "IRIS test"},
+            "files": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

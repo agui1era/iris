@@ -316,6 +316,11 @@ def load_config(
                     maximum=86_400.0,
                 ),
                 notification_threshold=notification_threshold,
+                notifications_enabled=_boolean(
+                    source,
+                    f"{prefix}_NOTIFICATIONS_ENABLED",
+                    True,
+                ),
             )
         )
 
@@ -379,6 +384,13 @@ def load_config(
     telegram_enabled = _boolean(source, "ENABLE_TELEGRAM", True)
     telegram_bot_token = source.get("TELEGRAM_BOT_TOKEN", "").strip() or None
     telegram_chat_id = source.get("TELEGRAM_CHAT_ID", "").strip() or None
+    telegram_dedup_cooldown_seconds = _integer(
+        source,
+        "TELEGRAM_DEDUP_COOLDOWN_SECONDS",
+        600,
+        minimum=0,
+        maximum=604_800,
+    )
 
     events_path_raw = source.get("EVENTS_JSONL_PATH", "data/events.jsonl").strip()
     return ServiceConfig(
@@ -450,6 +462,15 @@ def load_config(
         telegram_enabled=telegram_enabled,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        telegram_dedup_cooldown_seconds=telegram_dedup_cooldown_seconds,
+        history_chat_enabled=_boolean(source, "HISTORY_CHAT_ENABLED", True),
+        openai_api_key=source.get("OPENAI_API_KEY", "").strip() or None,
+        history_chat_model=(
+            source.get("HISTORY_CHAT_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        ),
+        history_chat_max_range_days=_integer(
+            source, "HISTORY_CHAT_MAX_RANGE_DAYS", 31, minimum=1, maximum=366
+        ),
         auth_jwt_secret=_auth_jwt_secret(source),
         auth_jwt_expires_minutes=_integer(source, "AUTH_JWT_EXPIRES_MINUTES", 480, minimum=5),
         api_cors_origins=_cors_origins(source),
@@ -490,6 +511,10 @@ def config_mapping(
         "SAVE_IMAGE_MIN_SEVERITY": config.save_image_min_severity,
         "CHANGE_THRESHOLD_PERCENT": str(config.change_threshold_percent),
         "ENABLE_TELEGRAM": str(config.telegram_enabled).lower(),
+        "TELEGRAM_DEDUP_COOLDOWN_SECONDS": str(config.telegram_dedup_cooldown_seconds),
+        "HISTORY_CHAT_ENABLED": str(config.history_chat_enabled).lower(),
+        "HISTORY_CHAT_MODEL": config.history_chat_model,
+        "HISTORY_CHAT_MAX_RANGE_DAYS": str(config.history_chat_max_range_days),
     }
     for camera in config.cameras:
         prefix = camera.identifier
@@ -501,6 +526,9 @@ def config_mapping(
                 f"{prefix}_PROMPT": camera.prompt,
                 f"{prefix}_POLL_INTERVAL_SECONDS": str(camera.poll_interval_seconds),
                 f"{prefix}_NOTIFICATION_THRESHOLD": camera.notification_threshold,
+                f"{prefix}_NOTIFICATIONS_ENABLED": str(
+                    camera.notifications_enabled
+                ).lower(),
             }
         )
     if include_secrets_and_infrastructure:
@@ -538,6 +566,8 @@ def config_mapping(
             values["TELEGRAM_BOT_TOKEN"] = config.telegram_bot_token
         if config.telegram_chat_id is not None:
             values["TELEGRAM_CHAT_ID"] = config.telegram_chat_id
+        if config.openai_api_key is not None:
+            values["OPENAI_API_KEY"] = config.openai_api_key
         if config.auth_jwt_secret is not None:
             values["AUTH_JWT_SECRET"] = config.auth_jwt_secret
     return values
@@ -574,9 +604,14 @@ def sanitized_config(config: ServiceConfig) -> dict[str, object]:
         "mongo_database": config.mongo_database,
         "mongo_detection_collection": config.mongo_detection_collection,
         "telegram_enabled": config.telegram_enabled,
+        "telegram_dedup_cooldown_seconds": config.telegram_dedup_cooldown_seconds,
         "telegram_configured": (
             config.telegram_bot_token is not None and config.telegram_chat_id is not None
         ),
+        "history_chat_enabled": config.history_chat_enabled,
+        "history_chat_configured": config.openai_api_key is not None,
+        "history_chat_model": config.history_chat_model,
+        "history_chat_max_range_days": config.history_chat_max_range_days,
         "auth_configured": config.auth_jwt_secret is not None,
         "auth_jwt_expires_minutes": config.auth_jwt_expires_minutes,
         "api_cors_origins": list(config.api_cors_origins),

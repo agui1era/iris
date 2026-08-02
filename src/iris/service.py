@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -25,6 +26,22 @@ from iris.sinks import CaptureStore, EventSink, MongoEventSink, MultiEventSink
 
 logger = logging.getLogger(__name__)
 _INITIAL_FRAME_RETRY_SECONDS = 1.0
+_NOTIFICATION_RISK_MINIMUM = {
+    "none": 0,
+    "info": 10,
+    "low": 30,
+    "medium": 50,
+    "high": 70,
+    "critical": 90,
+}
+_NOTIFICATION_SEVERITY_LABEL = {
+    "none": "Sin riesgo",
+    "info": "Informativa",
+    "low": "Baja",
+    "medium": "Media",
+    "high": "Alta",
+    "critical": "Crítica",
+}
 
 
 class Analyzer(Protocol):
@@ -69,21 +86,61 @@ class _AnalysisJob:
     latest_available: bool
 
 
+@dataclass(slots=True)
+class _NotificationState:
+    fingerprint: str
+    last_sent_at: float
+    last_risk: int
+    suppressed_count: int = 0
+
+
 def _meets_severity_threshold(severity: object, threshold: str) -> bool:
     if not isinstance(severity, str) or severity not in SEVERITY_ORDER:
         return False
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
 
 
+def _meets_notification_risk_threshold(risk_score: object, threshold: str) -> bool:
+    """Compare the model risk score with the camera threshold."""
+
+    if isinstance(risk_score, bool) or not isinstance(risk_score, int):
+        return False
+    minimum = _NOTIFICATION_RISK_MINIMUM.get(threshold)
+    return minimum is not None and risk_score >= minimum
+
+
 def _notification_caption(job: _AnalysisJob, result: AnalysisResult) -> str:
     risk_score = result.data.get("risk_score")
     severity = result.data.get("severity")
+    severity_label = (
+        _NOTIFICATION_SEVERITY_LABEL.get(severity.lower(), "Desconocida")
+        if isinstance(severity, str)
+        else "Desconocida"
+    )
     summary = result.data.get("summary") or ""
     return (
         f"{job.camera.name} ({job.camera.identifier})\n"
-        f"Severidad: {severity} · Riesgo: {risk_score}/100\n"
+        f"Severidad: {severity_label} · Riesgo: {risk_score}/100\n"
         f"{summary}"
     )
+
+
+def _notification_fingerprint(result: AnalysisResult) -> str:
+    """Stable event identity that ignores changing prose in the summary."""
+
+    event = result.data.get("event")
+    if not isinstance(event, str) or not event.strip():
+        event = "sin_evento" if result.data.get("alert") is False else "evento_desconocido"
+    normalized = re.sub(r"[^a-z0-9áéíóúñ]+", "_", event.casefold()).strip("_")
+    no_event_aliases = {
+        "none",
+        "no_event",
+        "no_event_detected",
+        "sin_evento",
+        "ningun_evento",
+        "ningún_evento",
+    }
+    return "sin_evento" if normalized in no_event_aliases else normalized
 
 
 def _advance_schedule(current: float, now: float, interval: float) -> float:
@@ -194,6 +251,8 @@ class MonitoringService:
         self._analysis_in_flight = False
         self._next_dispatch_position = 0
         self._rate_limiter = _SlidingWindowRateLimiter(config.max_api_calls_per_minute)
+        self._notification_states: dict[str, _NotificationState] = {}
+        self._notification_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._started = False
         self._closed = False
@@ -303,8 +362,15 @@ class MonitoringService:
         self._started = False
         logger.info("IRIS detenido correctamente.")
         if not readers_stopped:
-            raise RuntimeError(
-                "Uno o más lectores RTSP no terminaron; no es seguro iniciar otra generación."
+            # OpenCV/FFmpeg can occasionally remain blocked inside a native
+            # read even after release(). The reader is already detached from
+            # this service, has its stop flag set, and runs as a daemon; do not
+            # take down the supervisor and every healthy camera because that
+            # old socket is slow to unwind. It cannot publish new analyses and
+            # will exit as soon as the native call returns.
+            logger.warning(
+                "Uno o más lectores RTSP antiguos siguen liberando su socket; "
+                "la reconexión continuará con una generación nueva."
             )
 
     def _poll_camera(self, state: _CameraState) -> None:
@@ -536,6 +602,50 @@ class MonitoringService:
             captured_at=job.snapshot.captured_at.isoformat(),
         )
 
+    def _send_notification_if_due(
+        self,
+        job: _AnalysisJob,
+        result: AnalysisResult,
+    ) -> bool:
+        """Send the first/new/escalated event and group equal repetitions."""
+
+        assert self._notifier is not None
+        risk_value = result.data.get("risk_score")
+        if isinstance(risk_value, bool) or not isinstance(risk_value, int):
+            return False
+        camera_id = job.camera.identifier
+        fingerprint = _notification_fingerprint(result)
+        now = time.monotonic()
+        cooldown = self._config.telegram_dedup_cooldown_seconds
+        repeated = 0
+        with self._notification_lock:
+            previous = self._notification_states.get(camera_id)
+            same_event = previous is not None and previous.fingerprint == fingerprint
+            still_cooling = (
+                same_event
+                and cooldown > 0
+                and now - previous.last_sent_at < cooldown
+            )
+            escalated = same_event and risk_value > previous.last_risk
+            if still_cooling and not escalated:
+                previous.suppressed_count += 1
+                return False
+            if same_event:
+                repeated = previous.suppressed_count
+
+        caption = _notification_caption(job, result)
+        if repeated:
+            caption += f"\n\nSituación repetida {repeated} veces desde el último aviso."
+        sent = self._notifier.send_photo(job.jpeg, caption=caption)
+        if sent:
+            with self._notification_lock:
+                self._notification_states[camera_id] = _NotificationState(
+                    fingerprint=fingerprint,
+                    last_sent_at=now,
+                    last_risk=risk_value,
+                )
+        return sent
+
     def _analysis_done(
         self,
         state: _CameraState,
@@ -585,13 +695,18 @@ class MonitoringService:
             )
             preview_available = preview_path is not None or job.latest_available
             severity = result.data.get("severity")
+            risk_score = result.data.get("risk_score")
             if isinstance(severity, str) and severity in SEVERITY_ORDER:
                 with state.lock:
                     state.last_severity = severity
-            if self._notifier is not None and _meets_severity_threshold(
-                severity, job.camera.notification_threshold
+            if (
+                self._notifier is not None
+                and job.camera.notifications_enabled
+                and _meets_notification_risk_threshold(
+                    risk_score, job.camera.notification_threshold
+                )
             ):
-                self._notifier.send_photo(job.jpeg, caption=_notification_caption(job, result))
+                self._send_notification_if_due(job, result)
             if _meets_severity_threshold(severity, self._config.save_image_min_severity):
                 snapshot_path = self._captures.save(
                     job.jpeg,

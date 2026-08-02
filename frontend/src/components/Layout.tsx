@@ -34,6 +34,9 @@ export function Layout() {
           <NavLink to="/history" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
             {t("Historial", "History")}
           </NavLink>
+          <NavLink to="/chat" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
+            {t("Consulta IA", "AI inquiry")}
+          </NavLink>
           {user?.role === "admin" && (
             <NavLink to="/admin" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
               {t("Administración", "Administration")}

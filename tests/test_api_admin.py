@@ -219,6 +219,13 @@ def test_get_settings_returns_editable_pipeline_shape(
     assert body["change_threshold_percent"] == 0.0
     assert body["telegram_enabled"] is True
     assert body["telegram_configured"] is False
+    assert body["telegram_bot_token_configured"] is False
+    assert body["telegram_chat_id"] is None
+    assert body["telegram_dedup_cooldown_seconds"] == 600
+    assert body["history_chat_enabled"] is True
+    assert body["openai_api_key_configured"] is False
+    assert body["history_chat_model"] == "gpt-4.1-mini"
+    assert body["history_chat_max_range_days"] == 31
     assert body["alibaba_api_key_configured"] is True
     assert body["alibaba_base_url"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     assert body["alibaba_model"] == "qwen3.6-flash"
@@ -235,6 +242,13 @@ def test_get_settings_returns_editable_pipeline_shape(
         "change_threshold_percent",
         "telegram_enabled",
         "telegram_configured",
+        "telegram_bot_token_configured",
+        "telegram_chat_id",
+        "telegram_dedup_cooldown_seconds",
+        "history_chat_enabled",
+        "openai_api_key_configured",
+        "history_chat_model",
+        "history_chat_max_range_days",
         "alibaba_api_key_configured",
         "alibaba_base_url",
         "alibaba_model",
@@ -284,6 +298,154 @@ def test_patch_settings_toggles_telegram_enabled(
     assert patch_response.json()["telegram_enabled"] is False
     stored = config_store.read_config_mapping(config_db_path)
     assert stored["ENABLE_TELEGRAM"].strip().lower() == "false"
+
+
+def test_patch_settings_persists_telegram_credentials_without_returning_token(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+    revision = client.get("/admin/settings", headers=headers).json()["revision"]
+
+    response = client.patch(
+        "/admin/settings",
+        json={
+            "revision": revision,
+            "telegram_bot_token": "123456:secret-token",
+            "telegram_chat_id": "-1001234567890",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["telegram_configured"] is True
+    assert body["telegram_bot_token_configured"] is True
+    assert body["telegram_chat_id"] == "-1001234567890"
+    assert "123456:secret-token" not in response.text
+    stored = config_store.read_config_mapping(config_db_path)
+    assert stored["TELEGRAM_BOT_TOKEN"] == "123456:secret-token"
+    assert stored["TELEGRAM_CHAT_ID"] == "-1001234567890"
+
+
+def test_telegram_test_uses_latest_capture_and_retries(
+    api_app_factory: Callable, tmp_path: Path, monkeypatch
+) -> None:
+    config_db_path = tmp_path / "config.db"
+    capture_dir = tmp_path / "captures"
+    values = {
+        **_CAMERA_BASELINE,
+        "CAPTURE_DIR": str(capture_dir),
+        "TELEGRAM_BOT_TOKEN": "test-bot-token",
+        "TELEGRAM_CHAT_ID": "test-chat",
+    }
+    config_store.write_config_mapping(config_db_path, values)
+    app, users_db, _ = api_app_factory()
+    create_user(users_db, "admin", "s3cr3t", "admin")
+    client = TestClient(app)
+    token = client.post(
+        "/auth/login", json={"username": "admin", "password": "s3cr3t"}
+    ).json()["access_token"]
+    camera_dir = capture_dir / "CAM1"
+    camera_dir.mkdir(parents=True)
+    (camera_dir / "latest.jpg").write_bytes(b"newest-jpeg")
+
+    instances = []
+
+    class FakeNotifier:
+        def __init__(self, bot_token: str, chat_id: str) -> None:
+            assert (bot_token, chat_id) == ("test-bot-token", "test-chat")
+            self.photo_calls = []
+            self.closed = False
+            instances.append(self)
+
+        def send_photo(self, jpeg: bytes, *, caption: str) -> bool:
+            self.photo_calls.append((jpeg, caption))
+            return len(self.photo_calls) == 2
+
+        def send_message(self, text: str) -> bool:
+            raise AssertionError(f"unexpected fallback: {text}")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("iris.api.routes_admin.TelegramNotifier", FakeNotifier)
+    monkeypatch.setattr("iris.api.routes_admin.time.sleep", lambda _: None)
+
+    response = client.post(
+        "/admin/notifications/telegram/test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["with_image"] is True
+    assert response.json()["attempts"] == 2
+    assert [call[0] for call in instances[0].photo_calls] == [b"newest-jpeg", b"newest-jpeg"]
+    assert instances[0].closed is True
+
+
+def test_telegram_test_falls_back_to_text_without_capture(
+    api_app_factory: Callable, tmp_path: Path, monkeypatch
+) -> None:
+    config_db_path = tmp_path / "config.db"
+    values = {
+        **_CAMERA_BASELINE,
+        "CAPTURE_DIR": str(tmp_path / "empty-captures"),
+        "TELEGRAM_BOT_TOKEN": "test-bot-token",
+        "TELEGRAM_CHAT_ID": "test-chat",
+    }
+    config_store.write_config_mapping(config_db_path, values)
+    app, users_db, _ = api_app_factory()
+    create_user(users_db, "admin", "s3cr3t", "admin")
+    client = TestClient(app)
+    token = client.post(
+        "/auth/login", json={"username": "admin", "password": "s3cr3t"}
+    ).json()["access_token"]
+
+    class FakeNotifier:
+        def __init__(self, _bot_token: str, _chat_id: str) -> None:
+            self.messages = []
+
+        def send_photo(self, _jpeg: bytes, *, caption: str) -> bool:
+            raise AssertionError(f"unexpected photo: {caption}")
+
+        def send_message(self, text: str) -> bool:
+            self.messages.append(text)
+            return True
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("iris.api.routes_admin.TelegramNotifier", FakeNotifier)
+
+    response = client.post(
+        "/admin/notifications/telegram/test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["with_image"] is False
+    assert response.json()["attempts"] == 1
+
+
+def test_monitor_restart_bumps_revision_without_changing_config(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+    before_mapping, before_revision = config_store.read_config_snapshot(config_db_path)
+
+    response = client.post(
+        "/admin/monitor/restart",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["requested"] is True
+    assert response.json()["revision"] == before_revision + 1
+    assert config_store.read_config_snapshot(config_db_path) == (
+        before_mapping,
+        before_revision + 1,
+    )
 
 
 def test_patch_settings_persists_pipeline_values_and_advances_revision(
@@ -569,6 +731,7 @@ def test_get_cameras_returns_full_rtsp_url_prompt_and_polling(
             "prompt": "Vigila caídas visibles.",
             "poll_interval_seconds": 30.0,
             "notification_threshold": "high",
+            "notifications_enabled": True,
         }
     ]
     assert "rtsp://camera-one/live" in response.text
@@ -600,6 +763,7 @@ def test_post_camera_creates_second_camera_with_next_index(
     assert body["prompt"] == "Vigila la sala de estar."
     assert body["poll_interval_seconds"] == 45.0
     assert body["notification_threshold"] == "high"
+    assert body["notifications_enabled"] is True
     assert set(body) == {
         "index",
         "id",
@@ -608,6 +772,7 @@ def test_post_camera_creates_second_camera_with_next_index(
         "prompt",
         "poll_interval_seconds",
         "notification_threshold",
+        "notifications_enabled",
     }
 
     get_response = client.get("/admin/cameras", headers=headers)
@@ -736,6 +901,23 @@ def test_patch_camera_updates_notification_threshold(
     assert response.json()["notification_threshold"] == "medium"
     stored = config_store.read_config_mapping(config_db_path)
     assert stored["CAM1_NOTIFICATION_THRESHOLD"] == "medium"
+
+
+def test_patch_camera_toggles_notifications_for_one_camera(
+    api_app_factory: Callable, tmp_path: Path
+) -> None:
+    client, token, config_db_path = _seeded_admin_client(api_app_factory, tmp_path)
+
+    response = client.patch(
+        "/admin/cameras/1",
+        json={"notifications_enabled": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["notifications_enabled"] is False
+    stored = config_store.read_config_mapping(config_db_path)
+    assert stored["CAM1_NOTIFICATIONS_ENABLED"].lower() == "false"
 
 
 def test_patch_camera_rejects_invalid_notification_threshold(

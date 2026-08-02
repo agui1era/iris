@@ -9,7 +9,9 @@ import {
   fetchAdminUsers,
   fetchSettings,
   ROLES,
+  restartMonitorConnections,
   SEVERITY_LEVELS,
+  testTelegramNotification,
   updateAdminCamera,
   updateAdminUser,
   updateSettings,
@@ -22,6 +24,15 @@ import {
 } from "../api/client";
 import { CameraLivePreview } from "../components/CameraLivePreview";
 import { useLanguage } from "../i18n/useLanguage";
+
+const NOTIFICATION_RISK_MINIMUM = {
+  none: 0,
+  info: 10,
+  low: 30,
+  medium: 50,
+  high: 70,
+  critical: 90,
+} as const;
 
 export function AdminPage() {
   const { locale, t } = useLanguage();
@@ -42,17 +53,26 @@ export function AdminPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [alibabaApiKey, setAlibabaApiKey] = useState("");
+  const [openaiApiKey, setOpenaiApiKey] = useState("");
+  const [telegramBotToken, setTelegramBotToken] = useState("");
+  const [testingTelegram, setTestingTelegram] = useState(false);
+  const [telegramTestResult, setTelegramTestResult] = useState<string | null>(null);
+  const [telegramTestError, setTelegramTestError] = useState<string | null>(null);
 
   const [cameras, setCameras] = useState<AdminCameraRecord[]>([]);
   const [camerasLoading, setCamerasLoading] = useState(true);
   const [camerasError, setCamerasError] = useState<string | null>(null);
   const [pendingCameraIndex, setPendingCameraIndex] = useState<number | null>(null);
+  const [restartingMonitor, setRestartingMonitor] = useState(false);
+  const [monitorRestartResult, setMonitorRestartResult] = useState<string | null>(null);
+  const [monitorRestartError, setMonitorRestartError] = useState<string | null>(null);
 
   const [newCameraName, setNewCameraName] = useState("");
   const [newCameraRtspUrl, setNewCameraRtspUrl] = useState("");
   const [newCameraPrompt, setNewCameraPrompt] = useState("");
   const [newCameraPollInterval, setNewCameraPollInterval] = useState("30");
   const [newCameraNotificationThreshold, setNewCameraNotificationThreshold] = useState("high");
+  const [newCameraNotificationsEnabled, setNewCameraNotificationsEnabled] = useState(true);
   const [createCameraError, setCreateCameraError] = useState<string | null>(null);
   const [creatingCamera, setCreatingCamera] = useState(false);
 
@@ -62,6 +82,7 @@ export function AdminPage() {
   const [editCameraPrompt, setEditCameraPrompt] = useState("");
   const [editCameraPollInterval, setEditCameraPollInterval] = useState("30");
   const [editCameraNotificationThreshold, setEditCameraNotificationThreshold] = useState("high");
+  const [editCameraNotificationsEnabled, setEditCameraNotificationsEnabled] = useState(true);
   const [editCameraError, setEditCameraError] = useState<string | null>(null);
   const [savingCamera, setSavingCamera] = useState(false);
 
@@ -88,6 +109,8 @@ export function AdminPage() {
       const data = await fetchSettings();
       setSettings(data);
       setAlibabaApiKey("");
+      setOpenaiApiKey("");
+      setTelegramBotToken("");
       setSettingsError(null);
     } catch (err) {
       setSettingsError(
@@ -173,6 +196,11 @@ export function AdminPage() {
         save_image_min_severity: settings.save_image_min_severity,
         change_threshold_percent: settings.change_threshold_percent,
         telegram_enabled: settings.telegram_enabled,
+        telegram_chat_id: settings.telegram_chat_id,
+        telegram_dedup_cooldown_seconds: settings.telegram_dedup_cooldown_seconds,
+        history_chat_enabled: settings.history_chat_enabled,
+        history_chat_model: settings.history_chat_model,
+        history_chat_max_range_days: settings.history_chat_max_range_days,
         alibaba_base_url: settings.alibaba_base_url,
         alibaba_model: settings.alibaba_model,
         alibaba_timeout_seconds: settings.alibaba_timeout_seconds,
@@ -180,9 +208,13 @@ export function AdminPage() {
         alibaba_max_completion_tokens: settings.alibaba_max_completion_tokens,
       };
       if (alibabaApiKey.trim()) payload.alibaba_api_key = alibabaApiKey.trim();
+      if (telegramBotToken.trim()) payload.telegram_bot_token = telegramBotToken.trim();
+      if (openaiApiKey.trim()) payload.openai_api_key = openaiApiKey.trim();
       const updated = await updateSettings(payload);
       setSettings(updated);
       setAlibabaApiKey("");
+      setTelegramBotToken("");
+      setOpenaiApiKey("");
       setSettingsSaved(true);
     } catch (err) {
       setSettingsError(
@@ -194,6 +226,58 @@ export function AdminPage() {
       );
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleTelegramTest = async () => {
+    setTestingTelegram(true);
+    setTelegramTestResult(null);
+    setTelegramTestError(null);
+    try {
+      const result = await testTelegramNotification();
+      setTelegramTestResult(
+        result.with_image
+          ? t(`Prueba enviada con imagen (${result.attempts} intento).`, `Test sent with an image (${result.attempts} attempt).`)
+          : t(`Prueba enviada como mensaje de respaldo (${result.attempts} intento).`, `Test sent as a fallback message (${result.attempts} attempt).`),
+      );
+    } catch (err) {
+      setTelegramTestError(
+        err instanceof ApiError
+          ? err.message
+          : t("No se pudo enviar la notificación de prueba.", "Could not send the test notification."),
+      );
+    } finally {
+      setTestingTelegram(false);
+    }
+  };
+
+  const handleMonitorRestart = async () => {
+    const confirmed = window.confirm(
+      t(
+        "¿Reiniciar las conexiones RTSP? Las cámaras pueden quedar fuera de línea durante unos segundos.",
+        "Restart the RTSP connections? Cameras may appear offline for a few seconds.",
+      ),
+    );
+    if (!confirmed) return;
+    setRestartingMonitor(true);
+    setMonitorRestartResult(null);
+    setMonitorRestartError(null);
+    try {
+      const result = await restartMonitorConnections();
+      setMonitorRestartResult(
+        t(
+          `Reinicio solicitado (revisión ${result.revision}).`,
+          `Restart requested (revision ${result.revision}).`,
+        ),
+      );
+    } catch (err) {
+      setMonitorRestartError(
+        err instanceof ApiError
+          ? err.message
+          : t("No se pudo solicitar el reinicio.", "Could not request the restart."),
+      );
+    } finally {
+      setRestartingMonitor(false);
     }
   };
 
@@ -227,6 +311,7 @@ export function AdminPage() {
         prompt: newCameraPrompt,
         poll_interval_seconds: Number(newCameraPollInterval),
         notification_threshold: newCameraNotificationThreshold,
+        notifications_enabled: newCameraNotificationsEnabled,
       };
 
       await createAdminCamera(payload);
@@ -236,6 +321,7 @@ export function AdminPage() {
       setNewCameraPrompt("");
       setNewCameraPollInterval("30");
       setNewCameraNotificationThreshold("high");
+      setNewCameraNotificationsEnabled(true);
     } catch (err) {
       setCreateCameraError(err instanceof ApiError ? err.message : t("No se pudo crear la cámara.", "Could not create the camera."));
     } finally {
@@ -250,6 +336,7 @@ export function AdminPage() {
     setEditCameraPrompt(camera.prompt);
     setEditCameraPollInterval(String(camera.poll_interval_seconds));
     setEditCameraNotificationThreshold(camera.notification_threshold);
+    setEditCameraNotificationsEnabled(camera.notifications_enabled);
     setEditCameraError(null);
   };
 
@@ -271,6 +358,7 @@ export function AdminPage() {
         payload.poll_interval_seconds = Number(editCameraPollInterval);
       }
       payload.notification_threshold = editCameraNotificationThreshold;
+      payload.notifications_enabled = editCameraNotificationsEnabled;
 
       await updateAdminCamera(index, payload);
       await loadCameras();
@@ -415,7 +503,28 @@ export function AdminPage() {
       </section>
 
       <section className="panel">
-        <h2>{t("Cámaras", "Cameras")}</h2>
+        <div className="camera-admin-heading">
+          <div>
+            <h2>{t("Cámaras", "Cameras")}</h2>
+            <p className="muted">
+              {t("Administra las fuentes y recupera sus conexiones RTSP.", "Manage sources and recover their RTSP connections.")}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void handleMonitorRestart()}
+            disabled={restartingMonitor || cameras.length === 0}
+          >
+            {restartingMonitor ? t("Reiniciando conexiones…", "Restarting connections…") : t("Reiniciar conexiones RTSP", "Restart RTSP connections")}
+          </button>
+        </div>
+        {monitorRestartResult && (
+          <div className="alert alert-success" role="status">{monitorRestartResult}</div>
+        )}
+        {monitorRestartError && (
+          <div className="alert alert-error" role="alert">{monitorRestartError}</div>
+        )}
         {camerasError && (
           <div className="alert alert-error" role="alert">
             {camerasError}
@@ -434,6 +543,7 @@ export function AdminPage() {
                   <th>RTSP</th>
                   <th>Prompt</th>
                   <th>{t("Polling", "Polling")}</th>
+                  <th>{t("Canales", "Channels")}</th>
                   <th>{t("Última captura", "Latest capture")}</th>
                   <th></th>
                 </tr>
@@ -448,7 +558,7 @@ export function AdminPage() {
                         {camera.id} (#{camera.index})
                       </td>
                       {isEditing ? (
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <form
                             className="inline-edit-form"
                             onSubmit={(event) => void handleEditCameraSubmit(event, camera.index)}
@@ -506,27 +616,53 @@ export function AdminPage() {
                                   <span>{t("seg", "sec")}</span>
                                 </div>
                                 <span className="field-hint">
-                                  {t("RTSP se lee en paralelo; Alibaba procesa una solicitud global a la vez.", "RTSP is read in parallel; Alibaba processes one global request at a time.")}
+                                  {t("RTSP se lee en paralelo; el motor procesa una solicitud global a la vez.", "RTSP is read in parallel; the engine processes one global request at a time.")}
                                 </span>
                               </label>
-                              <label className="field">
-                                <span>{t("Umbral de notificación", "Notification threshold")}</span>
-                                <select
-                                  value={editCameraNotificationThreshold}
-                                  onChange={(event) =>
-                                    setEditCameraNotificationThreshold(event.target.value)
-                                  }
-                                >
-                                  {SEVERITY_LEVELS.map((level) => (
-                                    <option key={level} value={level}>
-                                      {t(({ none: "Ninguna", info: "Info", low: "Baja", medium: "Media", high: "Alta", critical: "Crítica" } as const)[level], ({ none: "None", info: "Info", low: "Low", medium: "Medium", high: "High", critical: "Critical" } as const)[level])}
-                                    </option>
-                                  ))}
-                                </select>
-                                <span className="field-hint">
-                                  {t("Severidad mínima para notificar (Telegram, próximamente). Por ahora sólo guarda el umbral.", "Minimum severity for notifications (Telegram, coming soon). For now, only the threshold is saved.")}
-                                </span>
-                              </label>
+                              <div className="camera-channel-config camera-edit-wide">
+                                <div className="camera-channel-config-heading">
+                                  <strong>{t("Canales de esta cámara", "Channels for this camera")}</strong>
+                                  <span>{t("Cada canal se activa y configura por separado.", "Each channel is enabled and configured separately.")}</span>
+                                </div>
+                                <div className="camera-channel-row">
+                                  <label className="checkbox-field channel-toggle">
+                                    <span>
+                                      <input
+                                        type="checkbox"
+                                        checked={editCameraNotificationsEnabled}
+                                        onChange={(event) =>
+                                          setEditCameraNotificationsEnabled(event.target.checked)
+                                        }
+                                      />
+                                      Telegram
+                                    </span>
+                                    <span className="field-hint">
+                                      {editCameraNotificationsEnabled
+                                        ? t("Activo para esta cámara", "Active for this camera")
+                                        : t("Desactivado para esta cámara", "Disabled for this camera")}
+                                    </span>
+                                  </label>
+                                  <label className="field">
+                                    <span>{t("Enviar desde riesgo", "Send from risk")}</span>
+                                    <select
+                                      value={editCameraNotificationThreshold}
+                                      disabled={!editCameraNotificationsEnabled}
+                                      onChange={(event) =>
+                                        setEditCameraNotificationThreshold(event.target.value)
+                                      }
+                                    >
+                                      {SEVERITY_LEVELS.map((level) => (
+                                        <option key={level} value={level}>
+                                          {NOTIFICATION_RISK_MINIMUM[level]}+ / 100 · {t(({ none: "Cualquier riesgo", info: "Informativo", low: "Bajo", medium: "Medio", high: "Alto", critical: "Crítico" } as const)[level], ({ none: "Any risk", info: "Informational", low: "Low", medium: "Medium", high: "High", critical: "Critical" } as const)[level])}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <span className="field-hint">
+                                      {t("Al alcanzar el puntaje, envía mensaje e imagen.", "When the score is reached, send the message and image.")}
+                                    </span>
+                                  </label>
+                                </div>
+                              </div>
                               <div className="camera-edit-actions">
                                 <button
                                   type="submit"
@@ -553,6 +689,13 @@ export function AdminPage() {
                           <td className="rtsp-cell"><code>{camera.rtsp_url}</code></td>
                           <td className="prompt-cell">{camera.prompt}</td>
                           <td>{camera.poll_interval_seconds}s</td>
+                          <td>
+                            <span className={`camera-channel-summary ${camera.notifications_enabled ? "is-active" : ""}`}>
+                              Telegram · {camera.notifications_enabled
+                                ? `${NOTIFICATION_RISK_MINIMUM[camera.notification_threshold as keyof typeof NOTIFICATION_RISK_MINIMUM] ?? 70}+`
+                                : t("Desactivado", "Disabled")}
+                            </span>
+                          </td>
                           <td>
                             <CameraLivePreview
                               cameraId={camera.id}
@@ -586,7 +729,7 @@ export function AdminPage() {
                 })}
                 {cameras.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="muted">
+                    <td colSpan={8} className="muted">
                       {t("No hay cámaras configuradas.", "No cameras are configured.")}
                     </td>
                   </tr>
@@ -633,25 +776,49 @@ export function AdminPage() {
                 <span>{t("seg", "sec")}</span>
               </div>
               <span className="field-hint">
-                {t("RTSP se lee en paralelo; Alibaba procesa una solicitud global a la vez.", "RTSP is read in parallel; Alibaba processes one global request at a time.")}
+                {t("RTSP se lee en paralelo; el motor procesa una solicitud global a la vez.", "RTSP is read in parallel; the engine processes one global request at a time.")}
               </span>
             </label>
-            <label className="field">
-              <span>{t("Umbral de notificación", "Notification threshold")}</span>
-              <select
-                value={newCameraNotificationThreshold}
-                onChange={(event) => setNewCameraNotificationThreshold(event.target.value)}
-              >
-                {SEVERITY_LEVELS.map((level) => (
-                  <option key={level} value={level}>
-                    {t(({ none: "Ninguna", info: "Info", low: "Baja", medium: "Media", high: "Alta", critical: "Crítica" } as const)[level], ({ none: "None", info: "Info", low: "Low", medium: "Medium", high: "High", critical: "Critical" } as const)[level])}
-                  </option>
-                ))}
-              </select>
-              <span className="field-hint">
-                {t("Severidad mínima para notificar (Telegram, próximamente). Por ahora sólo guarda el umbral.", "Minimum severity for notifications (Telegram, coming soon). For now, only the threshold is saved.")}
-              </span>
-            </label>
+          </div>
+          <div className="camera-channel-config">
+            <div className="camera-channel-config-heading">
+              <strong>{t("Canales de esta cámara", "Channels for this camera")}</strong>
+              <span>{t("Activa cada canal y define desde qué riesgo debe enviar.", "Enable each channel and choose the risk level that triggers delivery.")}</span>
+            </div>
+            <div className="camera-channel-row">
+              <label className="checkbox-field channel-toggle">
+                <span>
+                  <input
+                    type="checkbox"
+                    checked={newCameraNotificationsEnabled}
+                    onChange={(event) => setNewCameraNotificationsEnabled(event.target.checked)}
+                  />
+                  Telegram
+                </span>
+                <span className="field-hint">
+                  {newCameraNotificationsEnabled
+                    ? t("Activo para esta cámara", "Active for this camera")
+                    : t("Desactivado para esta cámara", "Disabled for this camera")}
+                </span>
+              </label>
+              <label className="field">
+                <span>{t("Enviar desde riesgo", "Send from risk")}</span>
+                <select
+                  value={newCameraNotificationThreshold}
+                  disabled={!newCameraNotificationsEnabled}
+                  onChange={(event) => setNewCameraNotificationThreshold(event.target.value)}
+                >
+                  {SEVERITY_LEVELS.map((level) => (
+                    <option key={level} value={level}>
+                      {NOTIFICATION_RISK_MINIMUM[level]}+ / 100 · {t(({ none: "Cualquier riesgo", info: "Informativo", low: "Bajo", medium: "Medio", high: "Alto", critical: "Crítico" } as const)[level], ({ none: "Any risk", info: "Informational", low: "Low", medium: "Medium", high: "High", critical: "Critical" } as const)[level])}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint">
+                  {t("Al alcanzar el puntaje, envía mensaje e imagen.", "When the score is reached, send the message and image.")}
+                </span>
+              </label>
+            </div>
           </div>
           <label className="field">
             <span>URL RTSP</span>
@@ -693,7 +860,7 @@ export function AdminPage() {
             <span className="eyebrow">{t("CONFIGURACIÓN PERSISTENTE", "PERSISTENT SETTINGS")}</span>
             <h2>{t("Motor de análisis", "Analysis engine")}</h2>
             <p>
-              {t("Controla resolución, capacidad de análisis y conexión con Alibaba.", "Control resolution, analysis capacity, and the Alibaba connection.")}
+              {t("Controla resolución, capacidad y conexión del motor de análisis.", "Control resolution, capacity, and the analysis engine connection.")}
             </p>
           </div>
           {settings && <span className="revision-badge">{t("REVISIÓN", "REVISION")} {settings.revision}</span>}
@@ -720,7 +887,7 @@ export function AdminPage() {
             onSubmit={(event) => void handleSettingsSubmit(event)}
           >
             <div className="settings-groups">
-              <fieldset className="settings-group">
+              <fieldset className="settings-group capture-settings-group">
                 <legend>{t("Captura general", "General capture")}</legend>
                 <p>{t("Valores base que aplican a todas las cámaras.", "Base values that apply to every camera.")}</p>
                 <div className="settings-field-grid">
@@ -778,7 +945,7 @@ export function AdminPage() {
               <fieldset className="settings-group">
                 <legend>{t("Capacidad y retención", "Capacity and retention")}</legend>
                 <p>
-                  {t("Los lectores RTSP operan en paralelo. Alibaba procesa una sola solicitud global; cada cámara conserva únicamente su candidato más reciente mientras espera turno.", "RTSP readers run in parallel. Alibaba processes one global request at a time; each camera keeps only its newest candidate while waiting.")}
+                  {t("Los lectores RTSP operan en paralelo. El motor procesa una sola solicitud global; cada cámara conserva únicamente su candidato más reciente mientras espera turno.", "RTSP readers run in parallel. The engine processes one global request at a time; each camera keeps only its newest candidate while waiting.")}
                 </p>
                 <div className="settings-field-grid">
                   <label className="field">
@@ -812,7 +979,7 @@ export function AdminPage() {
                       ))}
                     </select>
                   </label>
-                  <label className="field">
+                  <label className="field field-span-2">
                     <span>{t("Umbral de variación", "Variation threshold")}</span>
                     <div className="input-with-unit">
                       <input
@@ -832,7 +999,29 @@ export function AdminPage() {
                       {t("0 analiza siempre. Por encima de 0, un frame que varía menos que este porcentaje respecto al último analizado se omite — salvo que la última severidad conocida de esa cámara sea media o superior, en cuyo caso siempre se reanaliza.", "0 always analyzes. Above 0, a frame that differs by less than this percentage from the last analyzed frame is skipped—unless that camera's last known severity is medium or higher, in which case it is always analyzed again.")}
                     </span>
                   </label>
-                  <label className="field checkbox-field">
+                </div>
+              </fieldset>
+
+              <fieldset className="settings-group notification-channels-group">
+                <legend>{t("Canales de notificación", "Notification channels")}</legend>
+                <p>
+                  {t("Agrega y configura los canales disponibles. Cada cámara decide cuáles usa y desde qué nivel de riesgo.", "Add and configure available channels. Each camera decides which ones to use and its minimum risk level.")}
+                </p>
+                <div className="notification-channels-grid">
+                  <section className="notification-channel-card">
+                    <div className="notification-channel-heading">
+                      <div>
+                        <h3>Telegram</h3>
+                        <p>{t("Bot global para enviar una foto y el resumen del evento.", "Global bot for sending a photo and event summary.")}</p>
+                      </div>
+                      <span className={`channel-status ${settings.telegram_enabled && settings.telegram_configured ? "is-active" : ""}`}>
+                        {settings.telegram_enabled && settings.telegram_configured
+                          ? t("Activo", "Active")
+                          : t("Inactivo", "Inactive")}
+                      </span>
+                    </div>
+                    <div className="settings-field-grid">
+                  <label className="field checkbox-field field-span-2 telegram-master-switch">
                     <span>
                       <input
                         type="checkbox"
@@ -841,23 +1030,172 @@ export function AdminPage() {
                           updateSetting("telegram_enabled", event.target.checked)
                         }
                       />
-                      {t("Notificaciones Telegram", "Telegram notifications")}
+                      {t("Habilitar notificaciones", "Enable notifications")}
                     </span>
                     <span className="field-hint">
                       {settings.telegram_configured
-                        ? t("Bot y chat configurados. Desmarcar apaga el envío sin borrar las credenciales.", "Bot and chat configured. Unchecking disables delivery without deleting credentials.")
-                        : t("Todavía no hay bot/chat configurados (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, sólo por entorno); este interruptor no tiene efecto hasta que existan.", "No bot/chat is configured yet (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, environment only); this switch has no effect until they exist.")}
-                      {" "}{t("Notifica por cámara según su umbral configurado.", "Notifications are sent per camera according to its configured threshold.")}
+                        ? t("Bot y chat configurados. Desactivar pausa todos los envíos sin borrar las credenciales.", "Bot and chat configured. Disabling pauses all delivery without deleting credentials.")
+                        : t("Configura el token y el ID del chat para comenzar a enviar.", "Configure the token and chat ID to start sending.")}
                     </span>
+                  </label>
+                  <label className="field">
+                    <span className="field-label-with-status">
+                      {t("Token del bot", "Bot token")}
+                      <span
+                        className={`secret-status ${
+                          settings.telegram_bot_token_configured ? "is-configured" : ""
+                        }`}
+                      >
+                        {settings.telegram_bot_token_configured
+                          ? t("Configurado", "Configured")
+                          : t("Sin configurar", "Not configured")}
+                      </span>
+                    </span>
+                    <input
+                      type="password"
+                      value={telegramBotToken}
+                      onChange={(event) => {
+                        setTelegramBotToken(event.target.value);
+                        setSettingsSaved(false);
+                      }}
+                      placeholder={t("Vacío = conservar el token actual", "Empty = keep current token")}
+                      autoComplete="new-password"
+                    />
+                    <span className="field-hint">
+                      {t("Es de solo escritura y nunca vuelve al navegador.", "It is write-only and is never returned to the browser.")}
+                    </span>
+                  </label>
+                  <label className="field">
+                    <span>{t("ID del chat o canal", "Chat or channel ID")}</span>
+                    <input
+                      value={settings.telegram_chat_id ?? ""}
+                      maxLength={200}
+                      onChange={(event) => updateSetting("telegram_chat_id", event.target.value)}
+                      placeholder="-1001234567890"
+                      autoComplete="off"
+                    />
+                    <span className="field-hint">
+                      {t("Para canales, agrega el bot como administrador y usa el ID que comienza con -100.", "For channels, add the bot as an administrator and use the ID beginning with -100.")}
+                    </span>
+                  </label>
+                  <label className="field">
+                    <span>{t("Agrupar repeticiones durante", "Group repeats for")}</span>
+                    <div className="input-with-unit">
+                      <input
+                        type="number"
+                        min="0"
+                        max="604800"
+                        value={settings.telegram_dedup_cooldown_seconds}
+                        onChange={(event) =>
+                          updateSetting(
+                            "telegram_dedup_cooldown_seconds",
+                            Number(event.target.value),
+                          )
+                        }
+                        required
+                      />
+                      <span>seg</span>
+                    </div>
+                    <span className="field-hint">
+                      {t("El primer evento se envía de inmediato. Un evento distinto o un riesgo mayor no espera. 0 desactiva la agrupación.", "The first event is sent immediately. A different event or higher risk does not wait. 0 disables grouping.")}
+                    </span>
+                  </label>
+                    </div>
+                    <div className="telegram-test-actions">
+                      <div aria-live="polite">
+                        {telegramTestResult && <span className="save-confirmation">✓ {telegramTestResult}</span>}
+                        {telegramTestError && <span className="field-error">{telegramTestError}</span>}
+                        {!telegramTestResult && !telegramTestError && (
+                          <span className="field-hint">
+                            {t("Usa las credenciales guardadas y la captura más reciente. Si no hay imagen, envía un mensaje de respaldo.", "Uses the saved credentials and newest capture. If no image is available, it sends a fallback message.")}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => void handleTelegramTest()}
+                        disabled={testingTelegram || !settings.telegram_configured}
+                      >
+                        {testingTelegram ? t("Enviando prueba…", "Sending test…") : t("Enviar notificación de prueba", "Send test notification")}
+                      </button>
+                    </div>
+                  </section>
+                </div>
+              </fieldset>
+
+              <fieldset className="settings-group provider-settings-group">
+                <legend>{t("Asistente histórico", "Historical assistant")}</legend>
+                <p>
+                  {t("Consulta una cámara y un rango de fechas. Las detecciones repetidas se agregan antes de llamar al modelo.", "Query one camera and date range. Repeated detections are aggregated before calling the model.")}
+                </p>
+                <div className="settings-field-grid">
+                  <label className="field checkbox-field provider-wide-field">
+                    <span>
+                      <input
+                        type="checkbox"
+                        checked={settings.history_chat_enabled}
+                        onChange={(event) =>
+                          updateSetting("history_chat_enabled", event.target.checked)
+                        }
+                      />
+                      {t("Habilitar chat histórico", "Enable historical chat")}
+                    </span>
+                  </label>
+                  <label className="field provider-wide-field">
+                    <span className="field-label-with-status">
+                      OpenAI API key
+                      <span className={`secret-status ${settings.openai_api_key_configured ? "is-configured" : ""}`}>
+                        {settings.openai_api_key_configured ? t("Configurada", "Configured") : t("Sin configurar", "Not configured")}
+                      </span>
+                    </span>
+                    <input
+                      type="password"
+                      value={openaiApiKey}
+                      onChange={(event) => {
+                        setOpenaiApiKey(event.target.value);
+                        setSettingsSaved(false);
+                      }}
+                      placeholder={t("Vacío = conservar la clave actual", "Empty = keep current key")}
+                      autoComplete="new-password"
+                    />
+                    <span className="field-hint">
+                      {t("Es de solo escritura y nunca vuelve al navegador.", "It is write-only and is never returned to the browser.")}
+                    </span>
+                  </label>
+                  <label className="field">
+                    <span>{t("Modelo", "Model")}</span>
+                    <input
+                      value={settings.history_chat_model}
+                      maxLength={100}
+                      onChange={(event) => updateSetting("history_chat_model", event.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="field">
+                    <span>{t("Rango máximo", "Maximum range")}</span>
+                    <div className="input-with-unit">
+                      <input
+                        type="number"
+                        min="1"
+                        max="366"
+                        value={settings.history_chat_max_range_days}
+                        onChange={(event) =>
+                          updateSetting("history_chat_max_range_days", Number(event.target.value))
+                        }
+                        required
+                      />
+                      <span>{t("días", "days")}</span>
+                    </div>
                   </label>
                 </div>
               </fieldset>
 
-              <fieldset className="settings-group alibaba-settings-group">
-                <legend>{t("Proveedor Alibaba", "Alibaba provider")}</legend>
+              <fieldset className="settings-group alibaba-settings-group provider-settings-group">
+                <legend>{t("Proveedor de análisis", "Analysis provider")}</legend>
                 <p>{t("Credenciales y parámetros de la API de análisis semántico.", "Credentials and parameters for the semantic analysis API.")}</p>
                 <div className="settings-field-grid">
-                  <label className="field field-span-2">
+                  <label className="field provider-wide-field">
                     <span className="field-label-with-status">
                       API key
                       <span
@@ -882,7 +1220,7 @@ export function AdminPage() {
                       {t("La clave es de sólo escritura y nunca vuelve al navegador.", "The key is write-only and is never returned to the browser.")}
                     </span>
                   </label>
-                  <label className="field field-span-2">
+                  <label className="field provider-wide-field">
                     <span>Base URL</span>
                     <input
                       type="url"

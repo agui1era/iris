@@ -20,10 +20,11 @@ class CameraConfig:
     rtsp_url: str = field(repr=False)
     prompt: str = field(repr=False)
     poll_interval_seconds: float = 30.0
-    # Severidad mínima para disparar una notificación (Telegram u otro canal)
-    # de esta cámara. Sólo el umbral se persiste hoy; el envío en sí todavía
-    # no está implementado.
+    # Severidad mínima para disparar una notificación de esta cámara.
     notification_threshold: str = "high"
+    # Interruptor por cámara. El interruptor maestro de ServiceConfig y las
+    # credenciales globales siguen siendo necesarios para enviar.
+    notifications_enabled: bool = True
 
     @property
     def identifier(self) -> str:
@@ -77,6 +78,13 @@ class ServiceConfig:
     telegram_enabled: bool = True
     telegram_bot_token: str | None = field(default=None, repr=False)
     telegram_chat_id: str | None = None
+    # Evita inundar Telegram con el mismo evento. Las detecciones siguen
+    # persistiendo normalmente; sólo se agrupa el canal de salida.
+    telegram_dedup_cooldown_seconds: int = 600
+    history_chat_enabled: bool = True
+    openai_api_key: str | None = field(default=None, repr=False)
+    history_chat_model: str = "gpt-4.1-mini"
+    history_chat_max_range_days: int = 31
     auth_jwt_secret: str | None = None
     auth_jwt_expires_minutes: int = 480
     api_cors_origins: tuple[str, ...] = ("http://localhost:5173",)

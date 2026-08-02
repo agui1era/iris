@@ -19,6 +19,7 @@ from iris.models import ServiceConfig
 from .routes_admin import router as admin_router
 from .routes_auth import router as auth_router
 from .routes_cameras import router as cameras_router
+from .routes_chat import router as chat_router
 from .routes_dashboard import router as dashboard_router
 from .routes_detections import router as detections_router
 
@@ -77,12 +78,19 @@ def create_app(
     # reinicio aunque el .env original ya no esté. SQLite se crea con permisos
     # 0600 y la API nunca devuelve el valor en sus respuestas.
     seed_values["DASHSCOPE_API_KEY"] = config.alibaba.api_key
+    if config.openai_api_key:
+        seed_values["OPENAI_API_KEY"] = config.openai_api_key
     config_store.initialize_config_mapping(resolved_db_path, seed_values)
     stored_mapping = config_store.read_config_mapping(resolved_db_path)
     if "DASHSCOPE_API_KEY" not in stored_mapping:
         config_store.mutate_config_mapping(
             resolved_db_path,
             values={"DASHSCOPE_API_KEY": config.alibaba.api_key},
+        )
+    if config.openai_api_key and "OPENAI_API_KEY" not in stored_mapping:
+        config_store.mutate_config_mapping(
+            resolved_db_path,
+            values={"OPENAI_API_KEY": config.openai_api_key},
         )
     # Reload once after a possible first seed so app.state always reflects
     # the exact SQLite-backed control-plane snapshot.
@@ -131,6 +139,7 @@ def create_app(
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
     app.include_router(detections_router, prefix="/detections", tags=["detections"])
     app.include_router(cameras_router, prefix="/cameras", tags=["cameras"])
+    app.include_router(chat_router, prefix="/chat", tags=["chat"])
     app.include_router(admin_router, prefix="/admin", tags=["admin"])
     app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
 

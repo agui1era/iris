@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "../components/Layout";
 import { AdminPage } from "../pages/AdminPage";
+import { ChatPage } from "../pages/ChatPage";
 import { HistoryPage } from "../pages/HistoryPage";
 import { LatestPage } from "../pages/LatestPage";
 import { LoginPage } from "../pages/LoginPage";
@@ -16,6 +17,7 @@ export function AppRoutes() {
         <Route element={<Layout />}>
           <Route path="/" element={<LatestPage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/chat" element={<ChatPage />} />
           <Route element={<AdminRoute />}>
             <Route path="/admin" element={<AdminPage />} />
           </Route>

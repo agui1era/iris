@@ -126,6 +126,7 @@ CAM1_NAME=Bedroom
 CAM1_RTSP_URL=rtsp://username:password@host:554/stream
 CAM1_PROMPT=Detect falls and visible hazards near the bed.
 CAM1_POLL_INTERVAL_SECONDS=30
+CAM1_NOTIFICATIONS_ENABLED=true
 CAM1_NOTIFICATION_THRESHOLD=high
 ```
 
@@ -317,6 +318,10 @@ Variables principales:
 | `EVENTS_JSONL_PATH` | `data/events.jsonl` | Archivo de eventos completos |
 | `EVENTS_MAX_BYTES` | `50000000` | Tamaño de cada JSONL antes de rotar |
 | `EVENTS_BACKUP_COUNT` | `5` | Cantidad de archivos rotados |
+| `TELEGRAM_DEDUP_COOLDOWN_SECONDS` | `600` | Agrupa por cámara los avisos Telegram del mismo evento; `0` lo desactiva |
+| `HISTORY_CHAT_ENABLED` | `true` | Habilita las consultas históricas para usuarios autenticados |
+| `HISTORY_CHAT_MODEL` | `gpt-4.1-mini` | Modelo usado por el chat histórico |
+| `HISTORY_CHAT_MAX_RANGE_DAYS` | `31` | Rango máximo aceptado por consulta histórica |
 
 Contrato por cámara:
 
@@ -325,14 +330,15 @@ CAM1_NAME=Dormitorio
 CAM1_RTSP_URL=rtsp://usuario:clave@host:554/stream
 CAM1_PROMPT=Detecta caídas y riesgos alrededor de la cama.
 CAM1_POLL_INTERVAL_SECONDS=30
+CAM1_NOTIFICATIONS_ENABLED=true
 CAM1_NOTIFICATION_THRESHOLD=high
 ```
 
-`CAMn_NOTIFICATION_THRESHOLD` (default `high`) es la severidad mínima para
-notificar esa cámara por un canal externo (Telegram u otro). **Hoy sólo se
-valida y persiste el umbral**: todavía no existe el envío real de
-notificaciones; es la base para conectar ese canal más adelante sin tener que
-rediseñar la configuración por cámara.
+`CAMn_NOTIFICATIONS_ENABLED` activa o desactiva Telegram para esa cámara.
+`CAMn_NOTIFICATION_THRESHOLD` (default `high`, equivalente a un risk score de
+`70+`) fija el riesgo mínimo para enviar. Ambos valores se editan desde
+Administración; el token y el ID del chat también se guardan allí, y el token
+es siempre de solo escritura.
 
 Para agregar otra cámara, se crean `CAM2_*`, luego `CAM3_*`, y así sucesivamente.
 También se permiten canales con huecos (`CAM1`, `CAM3`, `CAM6`) y se conservan
@@ -507,20 +513,49 @@ Para convivir con la configuración existente de Sentinex también se aceptan
 ENABLE_TELEGRAM=true
 TELEGRAM_BOT_TOKEN=123456:AAExampleTokenNoEsReal
 TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_DEDUP_COOLDOWN_SECONDS=600
 ```
 
 Un único bot/chat global recibe la notificación (foto + texto) de cualquier
 análisis completado cuya severidad alcance o supere el
 `notification_threshold` **de esa cámara** (editable por cámara desde
-Administración; default `high`). Sin `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+Administración; default `high`/`70+`) y que tenga habilitado su checkbox de
+Telegram. Sin `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
 definidas, el envío queda desactivado y el comportamiento es idéntico al
-actual. `ENABLE_TELEGRAM` (default `true`) es un interruptor maestro aparte:
+actual. El token y el chat pueden configurarse desde Administración; el token
+es write-only y nunca vuelve al navegador. `ENABLE_TELEGRAM` (default `true`) es un interruptor maestro aparte:
 permite guardar las credenciales y dejar el envío apagado explícitamente sin
-borrarlas. Un fallo o timeout de Telegram se registra en el log y nunca
+borrarlas. El primer evento de cada cámara se envía inmediatamente. Si el mismo
+evento se repite, Telegram lo agrupa durante
+`TELEGRAM_DEDUP_COOLDOWN_SECONDS`; un evento distinto o un aumento de riesgo se
+envían sin esperar. Al vencer el cooldown, el siguiente aviso indica cuántas
+repeticiones se acumularon. Esta regla sólo afecta el canal de salida: todas las
+detecciones continúan guardándose en el historial. Un fallo o timeout de Telegram se registra en el log y nunca
 interrumpe el análisis semántico ni los demás sinks — mismo principio que el
 sink de MongoDB. No existe (todavía) enrutamiento de chats distintos por
 cámara: todas las cámaras que superen su propio umbral notifican al mismo
 chat.
+
+### Chat histórico con OpenAI (opcional)
+
+```dotenv
+HISTORY_CHAT_ENABLED=true
+OPENAI_API_KEY=...
+HISTORY_CHAT_MODEL=gpt-4.1-mini
+HISTORY_CHAT_MAX_RANGE_DAYS=31
+```
+
+La vista **Consulta IA** está disponible para cualquier usuario autenticado y
+acepta exactamente una cámara y un rango de fechas por conversación. El
+backend recorre todas las detecciones del rango y agrupa eventos repetidos por
+evento/severidad antes de llamar al modelo. El payload conserva conteos,
+primer/último timestamp, riesgo máximo y ejemplos representativos; no repite
+la misma detección cien veces.
+
+Cada conversación queda asociada al usuario que la creó. En cada consulta se
+envían completos sólo los últimos 20 mensajes del chat; los anteriores se
+compactan. La clave de OpenAI se configura desde Administración, es de solo
+escritura y nunca vuelve al navegador.
 
 ### Guardado de imágenes según severidad
 
@@ -653,6 +688,10 @@ Todos (salvo `/health` y `/auth/login`) requieren
 | `GET /detections?date_from=&date_to=&camera_id=&severity=&criticidad=&sort_by=&sort_order=&page=&page_size=` | cualquiera autenticado | Historial paginado y filtrado (`page_size` máx. `200`). `sort_by` es `captured_at` (default), `camera_id` o `criticidad`; `sort_order` es `desc` (default) o `asc` |
 | `GET /detections/{id}/image` | cualquiera autenticado | JPEG de la detección, si existe y está dentro de `CAPTURE_DIR` |
 | `DELETE /detections/{id}` | `admin` | Elimina una detección del historial (Mongo); no borra el JPEG asociado en disco |
+| `GET /chat/config` | cualquiera autenticado | Estado del chat, modelo, rango máximo y cámaras disponibles |
+| `GET /chat/threads` | cualquiera autenticado | Conversaciones históricas del usuario actual |
+| `GET /chat/threads/{id}` | propietario autenticado | Mensajes y alcance de una conversación propia |
+| `POST /chat/query` | cualquiera autenticado | Consulta una cámara/rango y devuelve el análisis histórico agregado |
 | `GET /api/dashboard` | cualquiera autenticado | Una tarjeta por cámara: conectividad, captura operacional y estado `completed/failed/pending` del último intento semántico |
 | `GET /cameras/{camera_id}/latest-frame` | cualquiera autenticado | Último frame capturado para el siguiente análisis de visión de esa cámara |
 | `GET /cameras/{camera_id}/events/{event_id}/frame` | cualquiera autenticado | Preview inmutable asociado exactamente a ese análisis |
@@ -660,7 +699,7 @@ Todos (salvo `/health` y `/auth/login`) requieren
 | `POST /admin/users` | `admin` | Crea un usuario: `{username, password, role}` |
 | `PATCH /admin/users/{username}` | `admin` | Actualiza `{role?, is_active?}` |
 | `GET /admin/settings` | `admin` | Revisión y configuración editable del motor de análisis |
-| `PATCH /admin/settings` | `admin` | Actualiza captura global, límites, severidad y proveedor Alibaba |
+| `PATCH /admin/settings` | `admin` | Actualiza captura, límites, Telegram, proveedor visual y chat histórico |
 | `GET /admin/cameras` | `admin` | Lista cámaras con URL RTSP completa, prompt e intervalo |
 | `POST /admin/cameras` | `admin` | Agrega `{name, rtsp_url, prompt, poll_interval_seconds, notification_threshold?}` |
 | `PATCH /admin/cameras/{index}` | `admin` | Actualiza campos parciales de una cámara existente |

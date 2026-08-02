@@ -10,6 +10,7 @@ import { CriticalityBadge } from "../components/CriticalityBadge";
 import { DashboardCapture } from "../components/DashboardCapture";
 import { SeverityBadge } from "../components/SeverityBadge";
 import { useLanguage } from "../i18n/useLanguage";
+import { analysisEventLabel, analysisMessageLabel } from "../i18n/analysisLabels";
 
 const UI_POLL_INTERVAL_MS = 3_000;
 const ALERT_SEVERITIES = new Set(["high", "critical"]);
@@ -79,8 +80,8 @@ function analysisStateMeta(camera: DashboardCamera, t: Translate): {
     return {
       label: t("ÚLTIMO INTENTO FALLÓ", "LATEST ATTEMPT FAILED"),
       note: camera.last_event
-        ? t("Alibaba falló en el último intento; se conserva abajo la última lectura válida.", "Alibaba failed on the latest attempt; the last valid reading is kept below.")
-        : t("Alibaba falló en el último intento y todavía no existe una lectura válida.", "Alibaba failed on the latest attempt and there is no valid reading yet."),
+        ? t("El último análisis falló; se conserva abajo la última lectura válida.", "The latest analysis failed; the last valid reading is kept below.")
+        : t("El último análisis falló y todavía no existe una lectura válida.", "The latest analysis failed and there is no valid reading yet."),
     };
   }
   if (camera.latest_analysis_status === "pending") {
@@ -88,7 +89,7 @@ function analysisStateMeta(camera: DashboardCamera, t: Translate): {
       label: t("PROCESANDO", "PROCESSING"),
       note: camera.last_event
         ? t("Hay una captura más reciente en proceso; la lectura visible corresponde al último análisis terminado.", "A newer capture is being processed; the visible reading is from the latest completed analysis.")
-        : t("La primera captura está esperando o siendo procesada por Alibaba.", "The first capture is waiting or being processed by Alibaba."),
+        : t("La primera captura está esperando o siendo procesada.", "The first capture is waiting or being processed."),
     };
   }
   if (camera.latest_analysis_status === "unavailable") {
@@ -104,7 +105,7 @@ function analysisStateMeta(camera: DashboardCamera, t: Translate): {
 }
 
 export function MonitoringPage() {
-  const { locale, t } = useLanguage();
+  const { language, locale, t } = useLanguage();
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -229,7 +230,7 @@ export function MonitoringPage() {
         <div>
           <span className="eyebrow">{t("OPERACIÓN EN TIEMPO REAL", "REAL-TIME OPERATIONS")}</span>
           <h1>{t("Centro de monitoreo", "Monitoring center")}</h1>
-          <p>{t("Capturas relevantes, riesgo operacional y lectura semántica de Alibaba.", "Relevant captures, operational risk, and semantic analysis by Alibaba.")}</p>
+          <p>{t("Capturas relevantes, riesgo operacional y análisis inteligente.", "Relevant captures, operational risk, and intelligent analysis.")}</p>
         </div>
         <div className="monitor-refresh">
           <span className="refresh-copy" aria-live="polite">
@@ -379,9 +380,13 @@ export function MonitoringPage() {
                   <div className="analysis-heading">
                     <div>
                       <span className="analysis-kicker">
-                        {t("ÚLTIMA LECTURA ALIBABA", "LATEST ALIBABA READING")} · {analysisState.label}
+                        {t("ÚLTIMO ANÁLISIS", "LATEST ANALYSIS")} · {analysisState.label}
                       </span>
-                      <strong>{analysis?.event ?? t("Sin análisis todavía", "No analysis yet")}</strong>
+                      <strong>
+                        {analysis?.event
+                          ? analysisEventLabel(analysis.event, language)
+                          : t("Sin análisis todavía", "No analysis yet")}
+                      </strong>
                     </div>
                     <div className="badge-group">
                       <SeverityBadge severity={severity} />
@@ -396,9 +401,11 @@ export function MonitoringPage() {
                   )}
 
                   <p className="analysis-summary">
-                    {analysis?.summary ??
+                    {analysis?.summary
+                      ? analysisMessageLabel(analysis.summary, language)
+                      :
                       (camera.latest_capture_url
-                        ? t("La cámara ya entregó una imagen, pero Alibaba todavía no registra una lectura semántica.", "The camera has delivered an image, but Alibaba has not recorded a semantic reading yet.")
+                        ? t("La cámara ya entregó una imagen, pero todavía no hay un análisis disponible.", "The camera has delivered an image, but no analysis is available yet.")
                         : diagnostic)}
                   </p>
 
@@ -422,7 +429,7 @@ export function MonitoringPage() {
                       className={`recommended-action ${needsAttention ? "needs-attention" : ""}`}
                     >
                       <span aria-hidden="true">{needsAttention ? "!" : "→"}</span>
-                      <p>{analysis.recommended_action}</p>
+                      <p>{analysisMessageLabel(analysis.recommended_action, language)}</p>
                     </div>
                   )}
                 </div>

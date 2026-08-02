@@ -8,6 +8,7 @@ import pytest
 import iris.config_store as config_store_module
 from iris.config_store import (
     ConfigRevisionConflict,
+    bump_config_revision,
     import_dotenv_into_db,
     initialize_config_mapping,
     is_config_initialized,
@@ -17,6 +18,17 @@ from iris.config_store import (
     read_config_snapshot,
     write_config_mapping,
 )
+
+
+def test_bump_revision_requests_reload_without_changing_values(tmp_path: Path) -> None:
+    path = tmp_path / "config.db"
+    initialize_config_mapping(path, {"CAM1_NAME": "Pasillo"})
+    before_mapping, before_revision = read_config_snapshot(path)
+
+    revision = bump_config_revision(path)
+
+    assert revision == before_revision + 1
+    assert read_config_snapshot(path) == (before_mapping, revision)
 
 
 def test_write_then_read_round_trips_values(tmp_path: Path) -> None:

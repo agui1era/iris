@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError, fetchDashboardCaptureBlob } from "../api/client";
+import { useLanguage } from "../i18n/useLanguage";
 
 type CaptureState = "loading" | "ready" | "empty" | "error";
 
@@ -17,6 +18,7 @@ export function DashboardCapture({
   refreshKey,
   emptyMessage,
 }: DashboardCaptureProps) {
+  const { t } = useLanguage();
   const [state, setState] = useState<CaptureState>(captureUrl ? "loading" : "empty");
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
@@ -54,14 +56,14 @@ export function DashboardCapture({
       <img
         className="monitor-capture"
         src={objectUrl}
-        alt={`Última captura de ${cameraName}`}
+        alt={t(`Última captura de ${cameraName}`, `Latest capture from ${cameraName}`)}
       />
     );
   }
 
   if (state === "loading") {
     return (
-      <div className="monitor-capture capture-loading" aria-label={`Cargando captura de ${cameraName}`}>
+      <div className="monitor-capture capture-loading" aria-label={t(`Cargando captura de ${cameraName}`, `Loading capture from ${cameraName}`)}>
         <span aria-hidden="true" />
       </div>
     );
@@ -73,18 +75,18 @@ export function DashboardCapture({
       role={state === "error" ? "alert" : "img"}
       aria-label={
         state === "error"
-          ? `No se pudo cargar la captura de ${cameraName}`
-          : `Todavía no hay captura para ${cameraName}`
+          ? t(`No se pudo cargar la captura de ${cameraName}`, `Could not load the capture from ${cameraName}`)
+          : t(`Todavía no hay captura para ${cameraName}`, `There is no capture for ${cameraName} yet`)
       }
     >
       <span className="capture-placeholder-mark" aria-hidden="true">
         ◉
       </span>
-      <strong>{state === "error" ? "Captura no disponible" : "Sin captura todavía"}</strong>
+      <strong>{state === "error" ? t("Captura no disponible", "Capture unavailable") : t("Sin captura todavía", "No capture yet")}</strong>
       <span>
         {state === "error"
-          ? "No se pudo descargar la última imagen capturada."
-          : (emptyMessage ?? "Esperando la primera captura de la cámara.")}
+          ? t("No se pudo descargar la última imagen capturada.", "The latest captured image could not be downloaded.")
+          : (emptyMessage ?? t("Esperando la primera captura de la cámara.", "Waiting for the camera's first capture."))}
       </span>
     </div>
   );

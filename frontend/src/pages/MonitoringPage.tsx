@@ -9,97 +9,102 @@ import {
 import { CriticalityBadge } from "../components/CriticalityBadge";
 import { DashboardCapture } from "../components/DashboardCapture";
 import { SeverityBadge } from "../components/SeverityBadge";
+import { useLanguage } from "../i18n/useLanguage";
 
 const UI_POLL_INTERVAL_MS = 3_000;
 const ALERT_SEVERITIES = new Set(["high", "critical"]);
 
-function formatClock(value: string | null): string {
-  if (!value) return "Sin registro";
+type Translate = (spanish: string, english: string) => string;
+
+function formatClock(value: string | null, locale: string, t: Translate): string {
+  if (!value) return t("Sin registro", "No record");
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Hora desconocida";
-  return new Intl.DateTimeFormat("es-CL", {
+  if (Number.isNaN(date.getTime())) return t("Hora desconocida", "Unknown time");
+  return new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   }).format(date);
 }
 
-function relativeTime(value: string | null, now: number): string {
-  if (!value) return "sin actividad";
+function relativeTime(value: string | null, now: number, t: Translate): string {
+  if (!value) return t("sin actividad", "no activity");
   const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return "hora desconocida";
+  if (Number.isNaN(timestamp)) return t("hora desconocida", "unknown time");
   const seconds = Math.max(0, Math.round((now - timestamp) / 1_000));
-  if (seconds < 10) return "ahora";
-  if (seconds < 60) return `hace ${seconds} s`;
+  if (seconds < 10) return t("ahora", "now");
+  if (seconds < 60) return t(`hace ${seconds} s`, `${seconds}s ago`);
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `hace ${minutes} min`;
-  return `hace ${Math.floor(minutes / 60)} h`;
+  if (minutes < 60) return t(`hace ${minutes} min`, `${minutes} min ago`);
+  return t(`hace ${Math.floor(minutes / 60)} h`, `${Math.floor(minutes / 60)}h ago`);
 }
 
 function isCameraOnline(camera: DashboardCamera): boolean {
   return camera.status.toLowerCase() === "online";
 }
 
-function cameraStatusMeta(camera: DashboardCamera): {
+function cameraStatusMeta(camera: DashboardCamera, t: Translate): {
   kind: "online" | "offline" | "waiting" | "unknown";
   label: string;
 } {
   const normalized = camera.status.toLowerCase();
-  if (normalized === "online") return { kind: "online", label: "En línea" };
-  if (normalized === "offline") return { kind: "offline", label: "Fuera de línea" };
-  if (normalized === "waiting") return { kind: "waiting", label: "Esperando señal" };
-  return { kind: "unknown", label: "Estado desconocido" };
+  if (normalized === "online") return { kind: "online", label: t("En línea", "Online") };
+  if (normalized === "offline") return { kind: "offline", label: t("Fuera de línea", "Offline") };
+  if (normalized === "waiting") return { kind: "waiting", label: t("Esperando señal", "Waiting for signal") };
+  return { kind: "unknown", label: t("Estado desconocido", "Unknown status") };
 }
 
 function captureDiagnostic(
   status: "online" | "offline" | "waiting" | "unknown",
   pollIntervalSeconds: number,
+  t: Translate,
 ): string {
   if (status === "offline") {
-    return "Sin conexión RTSP. Revisa URL, credenciales y acceso de red.";
+    return t("Sin conexión RTSP. Revisa URL, credenciales y acceso de red.", "No RTSP connection. Check the URL, credentials, and network access.");
   }
   if (status === "waiting") {
-    return `Esperando la primera conexión; una captura puede tardar hasta ${pollIntervalSeconds} s.`;
+    return t(`Esperando la primera conexión; una captura puede tardar hasta ${pollIntervalSeconds} s.`, `Waiting for the first connection; a capture may take up to ${pollIntervalSeconds}s.`);
   }
   if (status === "unknown") {
-    return "Sin estado de conectividad reciente. Revisa el stream si no aparece una captura.";
+    return t("Sin estado de conectividad reciente. Revisa el stream si no aparece una captura.", "No recent connectivity status. Check the stream if a capture does not appear.");
   }
-  return `Cámara conectada; esperando el próximo análisis (polling cada ${pollIntervalSeconds} s).`;
+  return t(`Cámara conectada; esperando el próximo análisis (polling cada ${pollIntervalSeconds} s).`, `Camera connected; waiting for the next analysis (polling every ${pollIntervalSeconds}s).`);
 }
 
-function analysisStateMeta(camera: DashboardCamera): {
+function analysisStateMeta(camera: DashboardCamera, t: Translate): {
   label: string;
   note: string | null;
 } {
   if (camera.latest_analysis_status === "failed") {
     return {
-      label: "ÚLTIMO INTENTO FALLÓ",
+      label: t("ÚLTIMO INTENTO FALLÓ", "LATEST ATTEMPT FAILED"),
       note: camera.last_event
-        ? "Alibaba falló en el último intento; se conserva abajo la última lectura válida."
-        : "Alibaba falló en el último intento y todavía no existe una lectura válida.",
+        ? t("Alibaba falló en el último intento; se conserva abajo la última lectura válida.", "Alibaba failed on the latest attempt; the last valid reading is kept below.")
+        : t("Alibaba falló en el último intento y todavía no existe una lectura válida.", "Alibaba failed on the latest attempt and there is no valid reading yet."),
     };
   }
   if (camera.latest_analysis_status === "pending") {
     return {
-      label: "PROCESANDO",
+      label: t("PROCESANDO", "PROCESSING"),
       note: camera.last_event
-        ? "Hay una captura más reciente en proceso; la lectura visible corresponde al último análisis terminado."
-        : "La primera captura está esperando o siendo procesada por Alibaba.",
+        ? t("Hay una captura más reciente en proceso; la lectura visible corresponde al último análisis terminado.", "A newer capture is being processed; the visible reading is from the latest completed analysis.")
+        : t("La primera captura está esperando o siendo procesada por Alibaba.", "The first capture is waiting or being processed by Alibaba."),
     };
   }
   if (camera.latest_analysis_status === "unavailable") {
     return {
-      label: "HISTORIAL NO DISPONIBLE",
-      note: "La captura sigue operativa, pero no se pudo consultar el estado semántico.",
+      label: t("HISTORIAL NO DISPONIBLE", "HISTORY UNAVAILABLE"),
+      note: t("La captura sigue operativa, pero no se pudo consultar el estado semántico.", "Capture remains operational, but the semantic status could not be retrieved."),
     };
   }
   if (camera.latest_analysis_status === "completed") {
-    return { label: "COMPLETADO", note: null };
+    return { label: t("COMPLETADO", "COMPLETED"), note: null };
   }
-  return { label: "SIN LECTURAS", note: null };
+  return { label: t("SIN LECTURAS", "NO READINGS"), note: null };
 }
 
 export function MonitoringPage() {
+  const { locale, t } = useLanguage();
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -121,14 +126,14 @@ export function MonitoringPage() {
       const message =
         caught instanceof ApiError
           ? caught.message
-          : "No se pudo conectar con el servicio de monitoreo.";
+          : t("No se pudo conectar con el servicio de monitoreo.", "Could not connect to the monitoring service.");
       setError(message);
     } finally {
       requestInFlightRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -186,11 +191,11 @@ export function MonitoringPage() {
       <div className="monitor-page" aria-busy="true">
         <div className="monitor-page-heading">
           <div>
-            <span className="eyebrow">OPERACIÓN EN TIEMPO REAL</span>
-            <h1>Centro de monitoreo</h1>
+            <span className="eyebrow">{t("OPERACIÓN EN TIEMPO REAL", "REAL-TIME OPERATIONS")}</span>
+            <h1>{t("Centro de monitoreo", "Monitoring center")}</h1>
           </div>
         </div>
-        <div className="monitor-skeleton-grid" aria-label="Cargando cámaras">
+        <div className="monitor-skeleton-grid" aria-label={t("Cargando cámaras", "Loading cameras")}>
           {[0, 1, 2, 3].map((item) => (
             <div className="monitor-skeleton-card" key={item} />
           ))}
@@ -206,10 +211,10 @@ export function MonitoringPage() {
           <span className="empty-state-mark" aria-hidden="true">
             !
           </span>
-          <h1>Monitoreo no disponible</h1>
-          <p>{error ?? "El servicio no respondió."}</p>
+          <h1>{t("Monitoreo no disponible", "Monitoring unavailable")}</h1>
+          <p>{error ?? t("El servicio no respondió.", "The service did not respond.")}</p>
           <button type="button" className="btn btn-primary" onClick={() => void load(true)}>
-            Reintentar conexión
+            {t("Reintentar conexión", "Retry connection")}
           </button>
         </div>
       </div>
@@ -222,13 +227,13 @@ export function MonitoringPage() {
     <div className="monitor-page">
       <div className="monitor-page-heading">
         <div>
-          <span className="eyebrow">OPERACIÓN EN TIEMPO REAL</span>
-          <h1>Centro de monitoreo</h1>
-          <p>Capturas relevantes, riesgo operacional y lectura semántica de Alibaba.</p>
+          <span className="eyebrow">{t("OPERACIÓN EN TIEMPO REAL", "REAL-TIME OPERATIONS")}</span>
+          <h1>{t("Centro de monitoreo", "Monitoring center")}</h1>
+          <p>{t("Capturas relevantes, riesgo operacional y lectura semántica de Alibaba.", "Relevant captures, operational risk, and semantic analysis by Alibaba.")}</p>
         </div>
         <div className="monitor-refresh">
           <span className="refresh-copy" aria-live="polite">
-            {updatedAt ? `Sincronizado ${formatClock(updatedAt.toISOString())}` : "Sin sincronizar"}
+            {updatedAt ? t(`Sincronizado ${formatClock(updatedAt.toISOString(), locale, t)}`, `Synced ${formatClock(updatedAt.toISOString(), locale, t)}`) : t("Sin sincronizar", "Not synced")}
           </span>
           <button
             type="button"
@@ -236,73 +241,68 @@ export function MonitoringPage() {
             onClick={() => void load(true)}
             disabled={refreshing}
           >
-            {refreshing ? "Sincronizando…" : "Actualizar ahora"}
+            {refreshing ? t("Sincronizando…", "Syncing…") : t("Actualizar ahora", "Refresh now")}
           </button>
         </div>
       </div>
 
       {error && (
         <div className="alert alert-warning" role="alert">
-          Se perdió la última sincronización: {error}. Se mantienen los últimos datos recibidos.
+          {t(`Se perdió la última sincronización: ${error}. Se mantienen los últimos datos recibidos.`, `The latest sync failed: ${error}. The last received data is still displayed.`)}
         </div>
       )}
 
-      <section className="monitor-metrics" aria-label="Resumen del monitoreo">
+      <section className="monitor-metrics" aria-label={t("Resumen del monitoreo", "Monitoring summary")}>
         <div className="metric-card">
-          <span className="metric-label">Cámaras activas</span>
+          <span className="metric-label">{t("Cámaras activas", "Active cameras")}</span>
           <strong>
             {metrics.online}
             <small> / {cameras.length}</small>
           </strong>
-          <span className="metric-foot positive">● señal reciente</span>
+          <span className="metric-foot positive">● {t("señal reciente", "recent signal")}</span>
         </div>
         <div className="metric-card">
-          <span className="metric-label">Alertas actuales</span>
+          <span className="metric-label">{t("Alertas actuales", "Current alerts")}</span>
           <strong>{metrics.alerts}</strong>
           <span className={metrics.alerts > 0 ? "metric-foot warning" : "metric-foot muted"}>
-            {metrics.alerts > 0 ? "requieren atención" : "sin alertas críticas"}
+            {metrics.alerts > 0 ? t("requieren atención", "require attention") : t("sin alertas críticas", "no critical alerts")}
           </span>
         </div>
         <div className="metric-card">
-          <span className="metric-label">Riesgo promedio</span>
+          <span className="metric-label">{t("Riesgo promedio", "Average risk")}</span>
           <strong>{metrics.averageRisk === null ? "—" : Math.round(metrics.averageRisk)}</strong>
-          <span className="metric-foot muted">riesgo promedio / 100</span>
+          <span className="metric-foot muted">{t("riesgo promedio / 100", "average risk / 100")}</span>
         </div>
         <div className="metric-card">
-          <span className="metric-label">Polling por cámara</span>
+          <span className="metric-label">{t("Polling por cámara", "Polling per camera")}</span>
           <strong>
             {metrics.pollingRange}
             <small> s</small>
           </strong>
-          <span className="metric-foot muted">mínimo 10 s · interfaz cada 3 s</span>
+          <span className="metric-foot muted">{t("mínimo 10 s · interfaz cada 3 s", "minimum 10s · interface every 3s")}</span>
         </div>
       </section>
 
       <div className="score-explainer">
         <span aria-hidden="true">i</span>
         <p>
-          <strong>Risk score</strong> mide urgencia operacional de 0 a 100.
-          <strong> Confianza</strong> indica cuán seguro está el modelo de su lectura; es una medida
-          separada y no equivale a riesgo. Bandas: 0–9 sin riesgo, 10–29 informativa, 30–49 baja,
-          50–69 media, 70–89 alta y 90–100 crítica.
-          <strong> Severidad</strong> (badge izquierdo) la calcula IRIS siempre a partir del risk
-          score. <strong>Criticidad</strong> (badge derecho, verde/amarillo/naranja/rojo) es la
-          lectura propia e independiente del modelo sobre la misma escena; se muestra a título
-          informativo y nunca reemplaza a la severidad. Negro significa que todavía no hay
-          análisis para esa cámara.
+          {t(
+            "Risk score mide urgencia operacional de 0 a 100. Confianza indica cuán seguro está el modelo de su lectura; es una medida separada y no equivale a riesgo. Bandas: 0–9 sin riesgo, 10–29 informativa, 30–49 baja, 50–69 media, 70–89 alta y 90–100 crítica. Severidad (badge izquierdo) la calcula IRIS siempre a partir del risk score. Criticidad (badge derecho, verde/amarillo/naranja/rojo) es la lectura propia e independiente del modelo sobre la misma escena; se muestra a título informativo y nunca reemplaza a la severidad. Negro significa que todavía no hay análisis para esa cámara.",
+            "Risk score measures operational urgency from 0 to 100. Confidence indicates how certain the model is about its reading; it is separate from risk. Bands: 0–9 no risk, 10–29 informational, 30–49 low, 50–69 medium, 70–89 high, and 90–100 critical. Severity (left badge) is always calculated by IRIS from the risk score. Criticality (right badge, green/yellow/orange/red) is the model's own independent reading of the same scene; it is informational and never replaces severity. Black means that camera has not been analyzed yet.",
+          )}
         </p>
       </div>
 
       <div className="camera-grid-heading">
         <div>
-          <h2>Cámaras</h2>
-          <span>{cameras.length} fuentes configuradas</span>
+          <h2>{t("Cámaras", "Cameras")}</h2>
+          <span>{cameras.length} {t("fuentes configuradas", "configured sources")}</span>
         </div>
-        <div className="legend" aria-label="Leyenda de estado">
-          <span><i className="status-dot online" />En línea</span>
-          <span><i className="status-dot offline" />Fuera de línea</span>
-          <span><i className="status-dot waiting" />Esperando</span>
-          <span><i className="status-dot unknown" />Desconocido</span>
+        <div className="legend" aria-label={t("Leyenda de estado", "Status legend")}>
+          <span><i className="status-dot online" />{t("En línea", "Online")}</span>
+          <span><i className="status-dot offline" />{t("Fuera de línea", "Offline")}</span>
+          <span><i className="status-dot waiting" />{t("Esperando", "Waiting")}</span>
+          <span><i className="status-dot unknown" />{t("Desconocido", "Unknown")}</span>
         </div>
       </div>
 
@@ -311,17 +311,17 @@ export function MonitoringPage() {
           <span className="empty-state-mark" aria-hidden="true">
             +
           </span>
-          <h2>No hay cámaras configuradas</h2>
-          <p>Un administrador puede agregar la primera fuente RTSP desde Configuración.</p>
+          <h2>{t("No hay cámaras configuradas", "No cameras configured")}</h2>
+          <p>{t("Un administrador puede agregar la primera fuente RTSP desde Configuración.", "An administrator can add the first RTSP source from Settings.")}</p>
         </div>
       ) : (
-        <section className="monitor-camera-grid" aria-label="Cámaras monitoreadas">
+        <section className="monitor-camera-grid" aria-label={t("Cámaras monitoreadas", "Monitored cameras")}>
           {cameras.map((camera) => {
             const event = camera.last_event;
             const analysis = event?.analysis;
-            const analysisState = analysisStateMeta(camera);
-            const status = cameraStatusMeta(camera);
-            const diagnostic = captureDiagnostic(status.kind, camera.poll_interval_seconds);
+            const analysisState = analysisStateMeta(camera, t);
+            const status = cameraStatusMeta(camera, t);
+            const diagnostic = captureDiagnostic(status.kind, camera.poll_interval_seconds, t);
             const severity = analysis?.severity ?? "none";
             const confidence =
               typeof analysis?.confidence === "number"
@@ -365,8 +365,8 @@ export function MonitoringPage() {
                   <div className="capture-overlay">
                     <span>
                       {camera.latest_capture_at
-                        ? relativeTime(camera.latest_capture_at, now)
-                        : "sin capturas"}
+                        ? relativeTime(camera.latest_capture_at, now, t)
+                        : t("sin capturas", "no captures")}
                     </span>
                     <span>
                       {dashboard.settings.frame_width} × {dashboard.settings.frame_height} ·{" "}
@@ -379,9 +379,9 @@ export function MonitoringPage() {
                   <div className="analysis-heading">
                     <div>
                       <span className="analysis-kicker">
-                        ÚLTIMA LECTURA ALIBABA · {analysisState.label}
+                        {t("ÚLTIMA LECTURA ALIBABA", "LATEST ALIBABA READING")} · {analysisState.label}
                       </span>
-                      <strong>{analysis?.event ?? "Sin análisis todavía"}</strong>
+                      <strong>{analysis?.event ?? t("Sin análisis todavía", "No analysis yet")}</strong>
                     </div>
                     <div className="badge-group">
                       <SeverityBadge severity={severity} />
@@ -398,21 +398,21 @@ export function MonitoringPage() {
                   <p className="analysis-summary">
                     {analysis?.summary ??
                       (camera.latest_capture_url
-                        ? "La cámara ya entregó una imagen, pero Alibaba todavía no registra una lectura semántica."
+                        ? t("La cámara ya entregó una imagen, pero Alibaba todavía no registra una lectura semántica.", "The camera has delivered an image, but Alibaba has not recorded a semantic reading yet.")
                         : diagnostic)}
                   </p>
 
                   <dl className="camera-facts">
                     <div>
-                      <dt>Riesgo</dt>
+                      <dt>{t("Riesgo", "Risk")}</dt>
                       <dd>{riskScore === null ? "—" : `${riskScore} / 100`}</dd>
                     </div>
                     <div>
-                      <dt>Lectura válida</dt>
-                      <dd>{formatClock(event?.captured_at ?? null)}</dd>
+                      <dt>{t("Lectura válida", "Valid reading")}</dt>
+                      <dd>{formatClock(event?.captured_at ?? null, locale, t)}</dd>
                     </div>
                     <div>
-                      <dt>Confianza IA</dt>
+                      <dt>{t("Confianza IA", "AI confidence")}</dt>
                       <dd>{confidence}</dd>
                     </div>
                   </dl>

@@ -1,5 +1,177 @@
 # IRIS
 
+[English](#english) · [Español](#español)
+
+## English
+
+IRIS is a multi-camera monitoring service for care environments. It reads RTSP
+streams, captures the newest frame from each camera, and sends scheduled images
+to Alibaba Model Studio for structured risk analysis. The web dashboard shows
+camera health, recent captures, risk scores, detection history, and system
+settings in English or Spanish.
+
+```text
+RTSP cameras
+     │
+     ▼
+parallel readers ──► latest frame per camera (single-frame buffer)
+                         │ per-camera polling, 10-second minimum
+                         ▼
+              aspect-preserving resize
+                         │
+                         ▼
+       JPEG + camera prompt ──► Alibaba Model Studio
+                         │ serialized requests
+                         ▼
+          versioned preview + JSONL/Mongo event
+                         │
+                         ▼
+                    web dashboard
+```
+
+### What it does
+
+- Discovers cameras from `CAMn_*` environment variables and also lets
+  administrators manage them from the dashboard.
+- Keeps only the newest RTSP frame, so delayed frames never build up in a
+  processing queue.
+- Reads cameras in parallel while limiting Alibaba analysis to one active
+  request at a time.
+- Reconnects unavailable cameras without interrupting the rest of the system.
+- Stores editable runtime settings in SQLite with revision checks to prevent
+  one browser session from overwriting another.
+- Writes every completed analysis to JSONL and can also publish detections to
+  MongoDB.
+- Can retain JPEG evidence according to severity and send camera-specific
+  threshold alerts through Telegram.
+- Keeps RTSP credentials and API keys out of logs. The Alibaba key is
+  write-only in the dashboard.
+
+IRIS assigns severity from the returned `risk_score`: `none` (0–9), `info`
+(10–29), `low` (30–49), `medium` (50–69), `high` (70–89), and `critical`
+(90–100). Model confidence is displayed separately and is never treated as a
+risk score.
+
+### Requirements
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 20 or newer with npm
+- RTSP cameras and Alibaba Model Studio credentials for live analysis
+
+### Install
+
+The setup script installs the Python and frontend dependencies and creates
+local `.env` files without overwriting existing ones:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+Use `./install.sh --create-admin` if you also want to create the first
+administrator during setup. The password is requested interactively and is not
+stored in shell history. Run `./install.sh --help` for the remaining options.
+
+Manual setup is also available:
+
+```bash
+cp .env.example .env
+uv sync --extra dev
+uv run iris-monitor --check-config
+uv run iris-users create --username admin --role admin
+
+cd frontend
+cp .env.example .env
+npm ci
+```
+
+Edit the root `.env` before starting the services. At minimum, replace the
+Alibaba credentials, camera URLs and prompts, and `AUTH_JWT_SECRET`.
+
+### Run
+
+Start each process in a separate terminal from the repository root:
+
+```bash
+uv run iris-monitor
+uv run iris-api
+cd frontend && npm run dev
+```
+
+The dashboard is served at `http://localhost:5173` and expects the API at
+`http://localhost:8000` by default. Its language selector is available on both
+the sign-in screen and the main navigation bar; the preference is saved in the
+browser.
+
+### Main configuration
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `FRAME_WIDTH` / `FRAME_HEIGHT` | `640` / `360` | Output resolution shared by all cameras |
+| `JPEG_QUALITY` | `82` | JPEG quality sent for analysis |
+| `MAX_API_CALLS_PER_MINUTE` | `60` | Global API budget; `0` disables the limit |
+| `CHANGE_THRESHOLD_PERCENT` | `0` | Minimum visual change before reanalysis; `0` analyzes every fresh frame |
+| `SAVE_IMAGE_MIN_SEVERITY` | `high` | Minimum severity required to retain a JPEG |
+| `CAPTURE_DIR` | `data/captures` | Capture and preview directory |
+| `EVENTS_JSONL_PATH` | `data/events.jsonl` | Local event log |
+| `IRIS_CONFIG_DB` | `data/config.db` | SQLite settings and users database |
+| `AUTH_JWT_SECRET` | none | Required secret for `iris-api` |
+| `API_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated dashboard origins |
+
+Each camera uses the following pattern:
+
+```dotenv
+CAM1_NAME=Bedroom
+CAM1_RTSP_URL=rtsp://username:password@host:554/stream
+CAM1_PROMPT=Detect falls and visible hazards near the bed.
+CAM1_POLL_INTERVAL_SECONDS=30
+CAM1_NOTIFICATION_THRESHOLD=high
+```
+
+Alibaba Model Studio requires `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, and
+`DASHSCOPE_MODEL`. MongoDB and Telegram are optional; their variables and
+operational details are documented in the Spanish reference below.
+
+### Dashboard API
+
+`iris-api` is separate from the monitor. It provides JWT authentication,
+detection history, camera previews, and administrator routes for users,
+cameras, and analysis settings. All routes except `/health` and `/auth/login`
+require a bearer token. Administrator routes are restricted to the `admin`
+role.
+
+Create the first administrator before signing in:
+
+```bash
+uv run iris-users create --username admin --role admin
+```
+
+### Tests
+
+```bash
+uv run pytest
+uv run ruff check .
+cd frontend && npm run lint && npm run build
+```
+
+Tests use fake cameras and Alibaba responses; they do not contact real streams
+or external APIs.
+
+### Production notes
+
+Build the dashboard with `npm run build` inside `frontend/` and serve
+`frontend/dist/` with a static web server. Set `VITE_API_BASE_URL` at build
+time and include the deployed dashboard origin in `API_CORS_ORIGINS`.
+
+Camera images may contain sensitive personal data. Define access, consent,
+retention, and data-residency policies before deploying IRIS in a real care
+environment.
+
+---
+
+## Español
+
 Servicio de monitoreo semántico multi-cámara. Lee streams RTSP y, cada 10
 segundos o más, extrae una captura a la resolución global configurada y la
 consulta en Alibaba Model Studio.
@@ -90,6 +262,19 @@ analizado por esa cámara:
 ## Inicio rápido
 
 Requiere Python 3.11 o posterior.
+
+La forma más rápida instala las dependencias de Python y del frontend y crea
+los archivos `.env` locales sin reemplazar los que ya existan:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+Usa `./install.sh --create-admin` para crear también el primer administrador
+durante la instalación, o `./install.sh --help` para ver todas las opciones.
+
+Instalación manual:
 
 ```bash
 cp .env.example .env

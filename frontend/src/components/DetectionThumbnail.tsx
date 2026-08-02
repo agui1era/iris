@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchDetectionImageBlob } from "../api/client";
+import { useLanguage } from "../i18n/useLanguage";
 
 /**
  * Loads a detection's image as an authenticated blob and renders it via an
@@ -8,6 +9,7 @@ import { fetchDetectionImageBlob } from "../api/client";
  * Authorization header, so this is the only way to display it.
  */
 export function DetectionThumbnail({ id, alt }: { id: string; alt: string }) {
+  const { t } = useLanguage();
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -35,8 +37,8 @@ export function DetectionThumbnail({ id, alt }: { id: string; alt: string }) {
 
   if (failed) {
     return (
-      <div className="thumb thumb-empty" aria-label="Imagen no disponible">
-        Sin imagen
+      <div className="thumb thumb-empty" aria-label={t("Imagen no disponible", "Image unavailable")}>
+        {t("Sin imagen", "No image")}
       </div>
     );
   }

@@ -1,15 +1,18 @@
 import { BrowserRouter } from "react-router-dom";
 
 import { AuthProvider } from "./auth/AuthContext";
+import { LanguageProvider } from "./i18n/LanguageProvider";
 import { AppRoutes } from "./routes/AppRoutes";
 
 function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <AppRoutes />
-      </BrowserRouter>
-    </AuthProvider>
+    <LanguageProvider>
+      <AuthProvider>
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+      </AuthProvider>
+    </LanguageProvider>
   );
 }
 

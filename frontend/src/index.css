@@ -210,6 +210,49 @@ select {
   gap: 0.6rem;
 }
 
+.language-switcher,
+.auth-language {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-alt);
+}
+
+.language-switcher button,
+.auth-language button {
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 7px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.language-switcher button.active,
+.auth-language button.active {
+  background: var(--color-surface-raised);
+  color: var(--color-primary);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}
+
+.language-switcher button:focus-visible,
+.auth-language button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.auth-language {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+}
+
 .username {
   font-weight: 500;
   font-size: 0.88rem;
@@ -469,6 +512,7 @@ select {
 }
 
 .auth-card {
+  position: relative;
   width: 100%;
   max-width: 340px;
   background: var(--color-surface);

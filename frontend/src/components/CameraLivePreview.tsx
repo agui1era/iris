@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError, fetchCameraLatestFrameBlob } from "../api/client";
+import { useLanguage } from "../i18n/useLanguage";
 
 type PreviewStatus = "loading" | "ready" | "no-frame" | "error";
 
@@ -29,6 +30,7 @@ export function CameraLivePreview({
   cameraId,
   pollIntervalSeconds,
 }: CameraLivePreviewProps) {
+  const { t } = useLanguage();
   const [status, setStatus] = useState<PreviewStatus>("loading");
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -55,7 +57,7 @@ export function CameraLivePreview({
           setStatus("no-frame");
         } else {
           setErrorMessage(
-            err instanceof ApiError ? err.message : "No se pudo cargar la vista de la cámara.",
+            err instanceof ApiError ? err.message : t("No se pudo cargar la vista de la cámara.", "Could not load the camera preview."),
           );
           setStatus("error");
         }
@@ -67,7 +69,7 @@ export function CameraLivePreview({
     };
     // `refreshToken` has no meaning of its own: bumping it is just how the
     // "Actualizar vista" button re-triggers this same effect on demand.
-  }, [cameraId, refreshToken]);
+  }, [cameraId, refreshToken, t]);
 
   const handleRefresh = () => setRefreshToken((token) => token + 1);
 
@@ -77,17 +79,16 @@ export function CameraLivePreview({
         <img
           className="camera-preview-frame thumb"
           src={objectUrl}
-          alt={`Último frame capturado de la cámara ${cameraId}`}
+          alt={t(`Último frame capturado de la cámara ${cameraId}`, `Latest frame captured by camera ${cameraId}`)}
         />
       ) : status === "no-frame" ? (
         <div
           className="camera-preview-frame camera-preview-message thumb-empty"
-          aria-label="Todavía no hay un frame capturado para esta cámara"
+          aria-label={t("Todavía no hay un frame capturado para esta cámara", "No frame has been captured for this camera yet")}
         >
-          <strong>Sin frame todavía</strong>
+          <strong>{t("Sin frame todavía", "No frame yet")}</strong>
           <small>
-            Espera al menos {pollIntervalSeconds}s. Si persiste, revisa la URL RTSP, sus
-            credenciales y la red.
+            {t(`Espera al menos ${pollIntervalSeconds}s. Si persiste, revisa la URL RTSP, sus credenciales y la red.`, `Wait at least ${pollIntervalSeconds}s. If this persists, check the RTSP URL, credentials, and network.`)}
           </small>
         </div>
       ) : status === "error" ? (
@@ -95,7 +96,7 @@ export function CameraLivePreview({
           className="camera-preview-frame camera-preview-message thumb-empty"
           role="alert"
         >
-          <strong>Error de captura</strong>
+          <strong>{t("Error de captura", "Capture error")}</strong>
           <small>{errorMessage}</small>
         </div>
       ) : (
@@ -108,7 +109,7 @@ export function CameraLivePreview({
         onClick={handleRefresh}
         disabled={status === "loading"}
       >
-        {status === "loading" ? "Actualizando…" : "Actualizar vista"}
+        {status === "loading" ? t("Actualizando…", "Refreshing…") : t("Actualizar vista", "Refresh preview")}
       </button>
     </div>
   );

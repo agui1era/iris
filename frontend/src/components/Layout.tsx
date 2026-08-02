@@ -2,6 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { useAuth } from "../auth/useAuth";
+import { useLanguage } from "../i18n/useLanguage";
 
 interface LocationState {
   notice?: string;
@@ -9,6 +10,7 @@ interface LocationState {
 
 export function Layout() {
   const { user, logout } = useAuth();
+  const { language, setLanguage, t } = useLanguage();
   const location = useLocation();
   const notice = (location.state as LocationState | null)?.notice;
   const [dismissedNotice, setDismissedNotice] = useState<string | null>(null);
@@ -18,7 +20,7 @@ export function Layout() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand" aria-label="IRIS centro de monitoreo">
+        <div className="brand" aria-label={t("IRIS centro de monitoreo", "IRIS monitoring center")}>
           <span className="brand-mark" aria-hidden="true">I</span>
           <span>
             IRIS
@@ -27,22 +29,42 @@ export function Layout() {
         </div>
         <nav className="nav">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-            Monitoreo
+            {t("Monitoreo", "Monitoring")}
           </NavLink>
           <NavLink to="/history" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-            Historial
+            {t("Historial", "History")}
           </NavLink>
           {user?.role === "admin" && (
             <NavLink to="/admin" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-              Administración
+              {t("Administración", "Administration")}
             </NavLink>
           )}
         </nav>
         <div className="user-info">
+          <div className="language-switcher" role="group" aria-label={t("Idioma", "Language")}>
+            <button
+              type="button"
+              className={language === "es" ? "active" : ""}
+              aria-pressed={language === "es"}
+              onClick={() => setLanguage("es")}
+            >
+              ES
+            </button>
+            <button
+              type="button"
+              className={language === "en" ? "active" : ""}
+              aria-pressed={language === "en"}
+              onClick={() => setLanguage("en")}
+            >
+              EN
+            </button>
+          </div>
           <span className="username">{user?.username}</span>
-          <span className={`role-badge role-${user?.role}`}>{user?.role}</span>
+          <span className={`role-badge role-${user?.role}`}>
+            {user?.role === "admin" ? t("Administrador", "Administrator") : t("Normal", "Standard")}
+          </span>
           <button type="button" className="btn btn-ghost" onClick={logout}>
-            Cerrar sesión
+            {t("Cerrar sesión", "Sign out")}
           </button>
         </div>
       </header>
@@ -53,7 +75,7 @@ export function Layout() {
           <button
             type="button"
             className="notice-dismiss"
-            aria-label="Cerrar aviso"
+            aria-label={t("Cerrar aviso", "Dismiss notice")}
             onClick={() => setDismissedNotice(notice ?? null)}
           >
             ×

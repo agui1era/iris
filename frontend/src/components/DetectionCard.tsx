@@ -2,12 +2,13 @@ import type { Detection } from "../api/client";
 import { CriticalityBadge } from "./CriticalityBadge";
 import { DetectionThumbnail } from "./DetectionThumbnail";
 import { SeverityBadge } from "./SeverityBadge";
+import { useLanguage } from "../i18n/useLanguage";
 
-function formatTimestamp(value: string | null): string {
+function formatTimestamp(value: string | null, locale: string): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  return date.toLocaleString(locale);
 }
 
 interface DetectionCardProps {
@@ -18,7 +19,8 @@ interface DetectionCardProps {
 }
 
 export function DetectionCard({ detection, onDelete, deleting = false }: DetectionCardProps) {
-  const cameraLabel = detection.camera_name ?? detection.camera_id ?? "Cámara desconocida";
+  const { locale, t } = useLanguage();
+  const cameraLabel = detection.camera_name ?? detection.camera_id ?? t("Cámara desconocida", "Unknown camera");
 
   return (
     <article className="detection-card">
@@ -26,7 +28,7 @@ export function DetectionCard({ detection, onDelete, deleting = false }: Detecti
         {detection.has_image ? (
           <DetectionThumbnail id={detection.id} alt={detection.event ?? cameraLabel} />
         ) : (
-          <div className="thumb thumb-empty">Sin imagen</div>
+          <div className="thumb thumb-empty">{t("Sin imagen", "No image")}</div>
         )}
       </div>
       <div className="detection-body">
@@ -37,21 +39,21 @@ export function DetectionCard({ detection, onDelete, deleting = false }: Detecti
             <CriticalityBadge criticidad={detection.criticidad} />
           </div>
         </div>
-        <div className="detection-timestamp">{formatTimestamp(detection.captured_at)}</div>
+        <div className="detection-timestamp">{formatTimestamp(detection.captured_at, locale)}</div>
         {typeof detection.risk_score === "number" && (
-          <div className="detection-risk">Riesgo {Math.round(detection.risk_score)} / 100</div>
+          <div className="detection-risk">{t("Riesgo", "Risk")} {Math.round(detection.risk_score)} / 100</div>
         )}
         {typeof detection.confidence === "number" && (
           <div className="detection-confidence">
-            Confianza IA {Math.round(detection.confidence * 100)}%
+            {t("Confianza IA", "AI confidence")} {Math.round(detection.confidence * 100)}%
           </div>
         )}
-        {detection.alert && <div className="detection-alert">Alerta</div>}
+        {detection.alert && <div className="detection-alert">{t("Alerta", "Alert")}</div>}
         {detection.event && <div className="detection-event">{detection.event}</div>}
         {detection.summary && <p className="detection-summary">{detection.summary}</p>}
         {detection.recommended_action && (
           <p className="detection-action">
-            <strong>Acción recomendada:</strong> {detection.recommended_action}
+            <strong>{t("Acción recomendada:", "Recommended action:")}</strong> {detection.recommended_action}
           </p>
         )}
         {onDelete && (
@@ -61,7 +63,7 @@ export function DetectionCard({ detection, onDelete, deleting = false }: Detecti
             onClick={onDelete}
             disabled={deleting}
           >
-            {deleting ? "Eliminando…" : "Eliminar"}
+            {deleting ? t("Eliminando…", "Deleting…") : t("Eliminar", "Delete")}
           </button>
         )}
       </div>
